@@ -1,3 +1,5 @@
+"""Module for Kafka orchestration for multiple topics"""
+
 from concurrent.futures import ProcessPoolExecutor
 from threading import Thread
 from typing import Iterable

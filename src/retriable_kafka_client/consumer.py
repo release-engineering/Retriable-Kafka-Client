@@ -1,3 +1,5 @@
+"""Base Kafka Consumer module"""
+
 import json
 import logging
 import sys
@@ -14,9 +16,12 @@ LOGGER = logging.getLogger(__name__)
 
 
 class BaseConsumer:
+    """
+    Base class for consuming from Kafka topics in Python
+    """
+
     def __init__(
         self,
-        /,
         config: TopicConfig,
         executor: Executor,
         max_concurrency: int = 16,
@@ -62,7 +67,7 @@ class BaseConsumer:
             self._consumer.list_topics(timeout=5)
             return True
         except KafkaException as e:
-            LOGGER.debug("Error while connecting to Kafka %s" % e)
+            LOGGER.debug("Error while connecting to Kafka %s", e)
             return False
 
     def __ack_message(self, message: Message, finished_future: Future) -> None:
@@ -105,7 +110,7 @@ class BaseConsumer:
             message_data = json.loads(message_value)
         except json.decoder.JSONDecodeError:
             # This message cannot be deserialized, just log and discard it
-            LOGGER.exception(f"Decoding error: not a valid JSON: {message.value()!r}")
+            LOGGER.exception("Decoding error: not a valid JSON: %s", message.value())
             self._consumer.commit(message)
             return None
         self.__semaphore.acquire()
@@ -114,7 +119,7 @@ class BaseConsumer:
         future.add_done_callback(lambda res: self.__ack_message(message, res))
         return future
 
-    def run(self):
+    def run(self) -> None:
         """
         Run the consumer. This starts consuming messages from kafka
         and their processing within the process pool.

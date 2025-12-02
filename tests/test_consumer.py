@@ -139,7 +139,7 @@ def test_consumer__ack_message(
     """Test that __ack_message always releases semaphore and commits message."""
     if expect_error_log:
         caplog.set_level(logging.ERROR)
-    
+
     mock_message = MagicMock(spec=Message, value=lambda: b"test message")
     mock_future = MagicMock(spec=Future)
     mock_future.exception.return_value = future_exception
@@ -154,15 +154,17 @@ def test_consumer__ack_message(
 
     # Semaphore should always be released
     assert base_consumer._BaseConsumer__semaphore.get_value() == initial_count
-    
+
     # Message should always be committed
     mock_consumer.commit.assert_called_once_with(mock_message)
-    
+
     # Error should be logged only if there was an exception
     if expect_error_log:
         assert any("Message could not be processed!" in msg for msg in caplog.messages)
     else:
-        assert not any("Message could not be processed!" in msg for msg in caplog.messages)
+        assert not any(
+            "Message could not be processed!" in msg for msg in caplog.messages
+        )
 
 
 def test_consumer_connection_healthcheck_success(
@@ -268,17 +270,17 @@ def test_consumer_run(
     """Test run method with various poll behaviors."""
     mock_consumer = base_consumer._consumer
     mock_consumer.subscribe = MagicMock()
-    
+
     call_count = 0
     mock_message = MagicMock() if poll_behavior == "normal_message" else None
-    
+
     def poll_side_effect(*_, **__):
         nonlocal call_count
         call_count += 1
         if call_count >= stop_after_polls:
             base_consumer._BaseConsumer__stop_flag = True
         return mock_message
-    
+
     mock_consumer.poll.side_effect = poll_side_effect
 
     if poll_behavior == "normal_message":
@@ -288,7 +290,7 @@ def test_consumer_run(
             mock_process.assert_called_once_with(mock_message)
     else:
         base_consumer.run()
-    
+
     mock_consumer.subscribe.assert_called_once_with(base_consumer._config.topics)
     mock_consumer.poll.assert_called()
     if poll_behavior == "continue_none":
