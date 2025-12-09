@@ -23,11 +23,13 @@ exclude = ["tests*"]
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]
+
 [dependency-groups]
 dev = [
     "coverage>=7.12.0",
     "mypy>=1.18.2",
     "pytest>=9.0.1",
+    "pytest-asyncio>=0.24.0",
     "pytest-cov>=7.0.0",
     "ruff>=0.14.5",
     "tox>=4.32.0",

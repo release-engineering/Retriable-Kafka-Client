@@ -4,7 +4,7 @@ from concurrent.futures import ProcessPoolExecutor
 from threading import Thread
 from typing import Iterable
 
-from .types import TopicConfig
+from .types import ConsumerConfig
 from .consumer import BaseConsumer
 
 
@@ -17,8 +17,16 @@ class ConsumerThread(Thread):
         self.consumer = consumer
         super().__init__(target=consumer.run)
 
+    def stop(self) -> None:
+        """
+        Gracefully stop the consumer and wait for its thread to exit.
+        :return: Nothing.
+        """
+        self.consumer.stop()
+        self.join()
 
-def consume_topics(topics: Iterable[TopicConfig], max_workers: int):
+
+def consume_topics(topics: Iterable[ConsumerConfig], max_workers: int):
     """
     Function for parallel consuming of multiple topics using executor pool
     for processing the messages and threads for dispatching the listeners.

@@ -10,7 +10,8 @@ from typing import Any
 
 from confluent_kafka import Consumer, Message, KafkaException
 
-from .types import TopicConfig
+from .kafka_settings import KafkaOptions, DEFAULT_CONSUMER_SETTINGS
+from .types import ConsumerConfig
 
 LOGGER = logging.getLogger(__name__)
 
@@ -22,7 +23,7 @@ class BaseConsumer:
 
     def __init__(
         self,
-        config: TopicConfig,
+        config: ConsumerConfig,
         executor: Executor,
         max_concurrency: int = 16,
     ):
@@ -44,20 +45,18 @@ class BaseConsumer:
     def _consumer(self) -> Consumer:
         """
         Create the consumer object, keep it in memory.
-        :return: The initialized consumer.
+        :return: Kafka consumer object.
         """
         if not self.__consumer_object:
+            config_dict = {
+                KafkaOptions.KAFKA_NODES: ",".join(self._config.kafka_hosts),
+                KafkaOptions.USERNAME: self._config.user_name,
+                KafkaOptions.PASSWORD: self._config.password,
+                KafkaOptions.GROUP_ID: self._config.group_id,
+                **DEFAULT_CONSUMER_SETTINGS,
+            }
             self.__consumer_object = Consumer(
-                {
-                    "bootstrap.servers": ",".join(self._config.kafka_hosts),
-                    "group.id": self._config.group_id,
-                    "auto.offset.reset": "earliest",
-                    "enable.auto.commit": False,
-                    "sasl.mechanisms": "SCRAM-SHA-512",
-                    "security.protocol": "SASL_SSL",
-                    "sasl.username": self._config.user_name,
-                    "sasl.password": self._config.password,
-                }
+                config_dict,
             )
         return self.__consumer_object
 
