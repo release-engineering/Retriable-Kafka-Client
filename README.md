@@ -42,6 +42,14 @@ Wait a while and then run:
 tox -e integration
 ```
 
+Don't forget to clean up the test environment afterward. Use
+
+```bash
+podman compose down
+```
+
+to do that (or switch `podman` with `docker` depending on your tool of choice).
+
 [1]: https://docs.astral.sh/uv/
 [2]: https://tox.wiki/en/4.32.0/
 [3]: https://podman.io/

@@ -16,7 +16,7 @@ def sample_config() -> ConsumerConfig:
         target=lambda _: None,
         kafka_hosts=["example.com"],
         group_id="test_group",
-        user_name="user",
+        username="user",
         password="pass",
     )
 
@@ -29,7 +29,7 @@ def multiple_configs() -> list[ConsumerConfig]:
             target=lambda _: None,
             kafka_hosts=["example.com"],
             group_id=f"group_{i}",
-            user_name="user",
+            username="user",
             password="pass",
         )
         for i in range(2)

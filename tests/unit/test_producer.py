@@ -18,7 +18,7 @@ def fast_config() -> ProducerConfig:
     return ProducerConfig(
         kafka_hosts=["example.com:9092"],
         topics=["test_topic"],
-        user_name="test_user",
+        username="test_user",
         password="test_pass",
         retries=2,
         fallback_factor=1.1,

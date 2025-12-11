@@ -40,7 +40,7 @@ class BaseProducer:
         if not self.__producer_object:
             config_dict = {
                 KafkaOptions.KAFKA_NODES: ",".join(self._config.kafka_hosts),
-                KafkaOptions.USERNAME: self._config.user_name,
+                KafkaOptions.USERNAME: self._config.username,
                 KafkaOptions.PASSWORD: self._config.password,
                 **DEFAULT_PRODUCER_SETTINGS,
             }

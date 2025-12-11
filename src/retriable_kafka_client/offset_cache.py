@@ -52,6 +52,25 @@ class OffsetCache:
     - untracked (committed or not polled)
     - pending for processing
     - pending for committing
+
+    Offsets are integers, specifying an index of each message in a cluster.
+    Each Kafka topic is divided into partitions, each partitions can be
+    consumed at most by ONE consumer within a consumer group. A consumer group
+    is identified by its group ID (string).
+
+    Offsets are tracked in cluster per partition per consumer group. The goal
+    of this cache is to hold information about offsets that cannot be committed
+    yet and also about offsets that can be committed already.
+
+    It is enough to commit only the offset of the last committable messages,
+    the cluster cannot hold more information than the latest offset for each
+    partition and consumer group.
+
+    The offsets cannot be committed when their message is finished processing,
+    because the order of finishing is not guaranteed. If this cache was not used,
+    then we could even overwrite a bigger offset with a smaller one if the message
+    process out of order, meaning that the latest message would be consumed again
+    on consumer restart.
     """
 
     def __init__(self):

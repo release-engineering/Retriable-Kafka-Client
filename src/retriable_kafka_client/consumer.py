@@ -21,13 +21,15 @@ class BaseConsumer:
     """
     Base class for consuming from Kafka topics in Python.
     The class utilizes executor for concurrent task processing,
-    this executor can even be shared between multiple consumer classed
+    this executor can even be shared between multiple consumer classes
     (intended usage).
 
     To synchronize messages correctly, this class holds information about
     messages that are being processed and messages that are waiting to be
     committed. The messages may wait for commiting because some message
     received before them may not be processed yet. And we always want
+    to commit only the latest processed message that is not preceded
+    by any non-processed (pending) message.
     """
 
     def __init__(
@@ -49,10 +51,15 @@ class BaseConsumer:
         """
         self._config = config
         self._executor = executor
+        # Used to handle max concurrency
         self.__semaphore = Semaphore(max_concurrency)
+        # Used for Kafka connections
         self.__consumer_object: Consumer | None = None
+        # Used for stopping the consumption
         self.__stop_flag: bool = False
+        # Override settings for Kafka Consumer object
         self.__additional_settings = additional_settings
+        # Store information about offsets
         self.__offset_cache = OffsetCache()
 
     @property
@@ -64,7 +71,7 @@ class BaseConsumer:
         if not self.__consumer_object:
             config_dict = {
                 KafkaOptions.KAFKA_NODES: ",".join(self._config.kafka_hosts),
-                KafkaOptions.USERNAME: self._config.user_name,
+                KafkaOptions.USERNAME: self._config.username,
                 KafkaOptions.PASSWORD: self._config.password,
                 KafkaOptions.GROUP_ID: self._config.group_id,
                 **DEFAULT_CONSUMER_SETTINGS,

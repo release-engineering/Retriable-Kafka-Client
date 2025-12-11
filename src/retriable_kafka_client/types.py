@@ -11,13 +11,13 @@ class _CommonConfig:
     Attributes:
         kafka_hosts: list of Kafka node URLs to connect to
         topics: list of topic names to connect to
-        user_name: consumer username
-        password: consumer password
+        username: Kafka username
+        password: Kafka password
     """
 
     kafka_hosts: list[str]
     topics: list[str]
-    user_name: str
+    username: str
     password: str
 
 
@@ -27,9 +27,9 @@ class ProducerConfig(_CommonConfig):
     Topic configuration common each producer, including backoff settings.
     Attributes:
         kafka_hosts: list of Kafka node URLs to connect to
-        topics: list of topic names to connect to
-        user_name: consumer username
-        password: consumer password
+        topics: list of topic names to publish to
+        username: producer username
+        password: producer password
         retries: number of attempts to publish the message
         fallback_factor: how many times longer should each backoff take
         fallback_base: what is the starting backoff in seconds
@@ -47,7 +47,7 @@ class ConsumerConfig(_CommonConfig):
     Attributes:
         kafka_hosts: list of Kafka node URLs to connect to
         topics: list of topic names to connect to
-        user_name: consumer username
+        username: consumer username
         password: consumer password
         group_id: consumer group ID to use when consuming
         target: Callable to execute on all parsed messages

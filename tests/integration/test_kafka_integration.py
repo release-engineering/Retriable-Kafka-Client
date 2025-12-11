@@ -100,7 +100,7 @@ def producer(kafka_config, topic_names) -> Generator[BaseProducer, None, None]:
     config = ProducerConfig(
         kafka_hosts=[kafka_config[KafkaOptions.KAFKA_NODES]],
         topics=topic_names,
-        user_name=kafka_config[KafkaOptions.USERNAME],
+        username=kafka_config[KafkaOptions.USERNAME],
         password=kafka_config[KafkaOptions.PASSWORD],
         retries=3,
         fallback_base=0.1,
@@ -128,7 +128,7 @@ async def test_producer_consumer_integration(producer, kafka_config, topic_names
     config = ConsumerConfig(
         kafka_hosts=[kafka_config[KafkaOptions.KAFKA_NODES]],
         topics=topic_names,
-        user_name=kafka_config[KafkaOptions.USERNAME],
+        username=kafka_config[KafkaOptions.USERNAME],
         password=kafka_config[KafkaOptions.PASSWORD],
         group_id=group_id,
         target=shared_messages.append,

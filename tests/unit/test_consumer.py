@@ -19,7 +19,7 @@ def sample_config() -> ConsumerConfig:
         target=lambda _: None,
         kafka_hosts=["example.com"],
         group_id="baz",
-        user_name="user",
+        username="user",
         password="pass",
     )
 
