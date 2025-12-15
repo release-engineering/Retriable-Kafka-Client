@@ -28,6 +28,10 @@ class _PartitionInfo(NamedTuple):
         """
         message_topic = message.topic()
         message_partition = message.partition()
+        # This should never happen with polled messages. Polled messages need
+        # the information asserted to be valid Kafka messages. This can
+        # happen only for custom-created messages objects, which this
+        # method is not intended to be used for
         assert message_topic is not None and message_partition is not None, (
             "Invalid message cannot be converted to partition info"
         )
