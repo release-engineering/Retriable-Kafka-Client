@@ -1,40 +1,42 @@
 from concurrent.futures import ProcessPoolExecutor
 from unittest.mock import patch, MagicMock
+import time
+import threading
 
 import pytest
 
-from retriable_kafka_client import TopicConfig, consume_topics, BaseConsumer
+from retriable_kafka_client import ConsumerConfig, consume_topics, BaseConsumer
 from retriable_kafka_client.orchestrate import ConsumerThread
 
 
 @pytest.fixture
-def sample_config() -> TopicConfig:
-    return TopicConfig(
+def sample_config() -> ConsumerConfig:
+    return ConsumerConfig(
         topics=["test_topic"],
         target=lambda _: None,
         kafka_hosts=["example.com"],
         group_id="test_group",
-        user_name="user",
+        username="user",
         password="pass",
     )
 
 
 @pytest.fixture
-def multiple_configs() -> list[TopicConfig]:
+def multiple_configs() -> list[ConsumerConfig]:
     return [
-        TopicConfig(
+        ConsumerConfig(
             topics=[f"topic_{i}"],
             target=lambda _: None,
             kafka_hosts=["example.com"],
             group_id=f"group_{i}",
-            user_name="user",
+            username="user",
             password="pass",
         )
         for i in range(2)
     ]
 
 
-def test_thread_init(sample_config: TopicConfig):
+def test_thread_init(sample_config: ConsumerConfig):
     consumer = BaseConsumer(
         config=sample_config, executor=MagicMock(), max_concurrency=1
     )
@@ -43,7 +45,7 @@ def test_thread_init(sample_config: TopicConfig):
 
 
 def test_consume_topics_creates_executor_and_threads(
-    multiple_configs: list[TopicConfig],
+    multiple_configs: list[ConsumerConfig],
 ) -> None:
     """Test that consume_topics creates ProcessPoolExecutor and threads correctly."""
     with (
@@ -101,3 +103,41 @@ def test_consume_topics_creates_executor_and_threads(
 
         # Cleanup: shutdown the executor
         created_executor.shutdown(wait=False)
+
+
+def test_consumer_thread_stop(sample_config: ConsumerConfig) -> None:
+    """Test that ConsumerThread.stop() properly stops the consumer and waits for thread."""
+    # Create a mock consumer with a controlled run method
+    mock_consumer = MagicMock(spec=BaseConsumer)
+
+    # Create a flag that will be controlled by the mock consumer
+    stop_flag = threading.Event()
+
+    def mock_run():
+        """Mock run method that loops until stop is called."""
+        while not stop_flag.is_set():
+            time.sleep(0.1)
+
+    def mock_stop():
+        """Mock stop method that sets the stop flag."""
+        stop_flag.set()
+
+    # Set up the mock
+    mock_consumer.run = mock_run
+    mock_consumer.stop = mock_stop
+
+    # Create and start the consumer thread
+    thread = ConsumerThread(mock_consumer)
+    thread.start()
+
+    # Verify thread is running
+    assert thread.is_alive()
+
+    # Call stop() - this should call consumer.stop() and join the thread
+    thread.stop()
+
+    # Verify the thread has stopped
+    assert not thread.is_alive()
+
+    # Verify consumer.stop was called
+    assert stop_flag.is_set()
