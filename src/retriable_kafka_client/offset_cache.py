@@ -23,8 +23,9 @@ class _PartitionInfo(NamedTuple):
     def from_message(message: Message) -> "_PartitionInfo":
         """
         Create a _PartitionInfo from a Kafka message.
-        :param message: Kafka message object
-        :return: hashable info about a partition
+        Args:
+             message: Kafka message object
+        Returns: hashable info about a partition
         """
         message_topic = message.topic()
         message_partition = message.partition()
@@ -40,9 +41,10 @@ class _PartitionInfo(NamedTuple):
     def to_offset_info(self, offset: int) -> TopicPartition:
         """
         Create a Kafka-committable object using the provided offset.
-        :param offset: The offset to be committed. Make sure to commit
-            offset one higher than the latest processed message.
-        :return: The committable Kafka object
+        Args:
+            offset: The offset to be committed. Make sure to commit
+                offset one higher than the latest processed message.
+        Returns: The committable Kafka object
         """
         return TopicPartition(topic=self.topic, partition=self.partition, offset=offset)
 
@@ -92,7 +94,7 @@ class OffsetCache:
         Clean up memory after fetching relevant data (returned offsets should
         be immediately committed).
 
-        :return: list of committable message offsets
+        Returns: list of committable message offsets
         """
         to_commit = []
         with self.__commit_lock:
@@ -140,8 +142,8 @@ class OffsetCache:
     def process_message(self, message: Message) -> None:
         """
         Mark message as pending for processing.
-        :param message: Kafka message object
-        :return: Nothing
+        Args:
+            message: Kafka message object
         """
         message_offset: int = message.offset()  # type: ignore[assignment]
         with self.__commit_lock:
@@ -153,8 +155,10 @@ class OffsetCache:
     def schedule_commit(self, message: Message) -> bool:
         """
         Mark message as pending for committing.
-        :param message: Kafka message object
-        :return: True if successful (the message was previously marked
+        Args:
+            message: Kafka message object
+        Returns:
+            True if successful (the message was previously marked
             as pending for processing), False otherwise
         """
         partition_info = _PartitionInfo.from_message(message)
@@ -180,7 +184,7 @@ class OffsetCache:
         """
         Handle revocation of partitions. This happens during
         cluster rebalancing.
-        :return: Nothing
+        Returns: Nothing
         """
         if not self.has_cache():
             return
@@ -209,6 +213,6 @@ class OffsetCache:
     def has_cache(self) -> bool:
         """
         Determine if there is anything pending to process or to commit.
-        :return: True if there is cache, False otherwise
+        Returns: True if there is cache, False otherwise
         """
         return any(self.__to_process.values()) or any(self.__to_commit.values())

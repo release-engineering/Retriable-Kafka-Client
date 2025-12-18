@@ -6,18 +6,20 @@ import threading
 import pytest
 
 from retriable_kafka_client import ConsumerConfig, consume_topics, BaseConsumer
+from retriable_kafka_client.config import ConsumeTopicConfig
 from retriable_kafka_client.orchestrate import ConsumerThread
 
 
 @pytest.fixture
 def sample_config() -> ConsumerConfig:
     return ConsumerConfig(
-        topics=["test_topic"],
+        topics=[ConsumeTopicConfig(base_topic="test_topic", retry_topic=None)],
         target=lambda _: None,
         kafka_hosts=["example.com"],
         group_id="test_group",
         username="user",
         password="pass",
+        additional_settings={},
     )
 
 
@@ -25,12 +27,13 @@ def sample_config() -> ConsumerConfig:
 def multiple_configs() -> list[ConsumerConfig]:
     return [
         ConsumerConfig(
-            topics=[f"topic_{i}"],
+            topics=[ConsumeTopicConfig(base_topic=f"topic_{i}", retry_topic=None)],
             target=lambda _: None,
             kafka_hosts=["example.com"],
             group_id=f"group_{i}",
             username="user",
             password="pass",
+            additional_settings={},
         )
         for i in range(2)
     ]
