@@ -121,16 +121,17 @@ class BaseConsumer:
         """
         committable = self.__offset_cache.pop_committable()
         if committable:
-            self._consumer.commit(offsets=committable)
+            self._consumer.commit(offsets=committable, asynchronous=False)
 
-    def __on_revoke(self, _: Consumer, __: list[TopicPartition]) -> None:
+    def __on_revoke(self, _: Consumer, partitions: list[TopicPartition]) -> None:
         """
         Callback when partitions are revoked during rebalancing.
         """
         if not self.__offset_cache.has_cache():
             return
+        self.__schedule_cache.register_revoke(partitions)
         self.__perform_commits()
-        self.__offset_cache.register_revoke()
+        self.__offset_cache.register_revoke(partitions)
 
     def __ack_message(self, message: Message, finished_future: Future) -> None:
         """

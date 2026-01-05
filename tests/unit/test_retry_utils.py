@@ -1,9 +1,10 @@
 """Unit tests for retry_utils module"""
 
+import logging
 from unittest.mock import MagicMock, patch
 
 import pytest
-from confluent_kafka import KafkaException, KafkaError
+from confluent_kafka import KafkaException, KafkaError, TopicPartition
 
 from retriable_kafka_client.config import ConsumerConfig, ConsumeTopicConfig
 from retriable_kafka_client.retry_utils import (
@@ -182,6 +183,164 @@ class TestRetryScheduleCache:
             return_value=future_timestamp - 100,
         ):
             assert cache.add_if_applicable(message) is True
+
+    def test_clean_empty_removes_empty_timestamp_keys(self) -> None:
+        """Test _clean_empty removes timestamps with empty message lists."""
+        cache = RetryScheduleCache()
+        cache._RetryScheduleCache__schedule = {
+            100: [],
+            200: _make_message(
+                topic="topic-a",
+                partition=0,
+                headers=[(TIMESTAMP_HEADER, int(200).to_bytes(8, "big"))],
+            ),
+        }
+
+        cache._cleanup()
+
+        # Verify empty keys are removed, non-empty remain
+        assert len(cache._RetryScheduleCache__schedule) == 1
+        assert 100 not in cache._RetryScheduleCache__schedule
+        assert 200 in cache._RetryScheduleCache__schedule
+
+    @pytest.mark.parametrize(
+        "scheduled_messages,partitions_to_revoke,expected_log_count,expected_remaining_count",
+        [
+            pytest.param(
+                [],
+                [],
+                0,
+                0,
+                id="empty_schedule_no_revoke",
+            ),
+            pytest.param(
+                [
+                    ("topic-a", 0, 1000.0),
+                    ("topic-a", 1, 1000.0),
+                ],
+                [("topic-a", 0), ("topic-a", 1)],
+                2,
+                0,
+                id="revoke_all_scheduled_messages",
+            ),
+            pytest.param(
+                [
+                    ("topic-a", 0, 1000.0),
+                    ("topic-a", 1, 1500.0),
+                    ("topic-b", 0, 2000.0),
+                ],
+                [("topic-a", 0)],
+                1,
+                2,
+                id="partial_revoke_one_partition",
+            ),
+            pytest.param(
+                [
+                    ("topic-a", 0, 1000.0),
+                    ("topic-a", 1, 1000.0),
+                    ("topic-b", 0, 2000.0),
+                    ("topic-c", 0, 3000.0),
+                ],
+                [("topic-a", 0), ("topic-a", 1)],
+                2,
+                2,
+                id="partial_revoke_multiple_partitions_same_topic",
+            ),
+            pytest.param(
+                [
+                    ("topic-a", 0, 1000.0),
+                    ("topic-b", 0, 1000.0),
+                    ("topic-c", 0, 1000.0),
+                ],
+                [("topic-a", 0), ("topic-c", 0)],
+                2,
+                1,
+                id="partial_revoke_multiple_topics",
+            ),
+            pytest.param(
+                [
+                    ("topic-a", 0, 1000.0),
+                    ("topic-a", 1, 1000.0),
+                ],
+                [("topic-b", 0)],
+                0,
+                2,
+                id="revoke_untracked_partition_no_effect",
+            ),
+            pytest.param(
+                [
+                    ("topic-a", 0, 1000.0),
+                    ("topic-a", 0, 2000.0),
+                    ("topic-a", 1, 3000.0),
+                ],
+                [("topic-a", 0)],
+                2,
+                1,
+                id="revoke_partition_with_multiple_timestamps",
+            ),
+        ],
+    )
+    def test_register_revoke(
+        self,
+        caplog: pytest.LogCaptureFixture,
+        scheduled_messages: list[tuple[str, int, float]],
+        partitions_to_revoke: list[tuple[str, int]],
+        expected_log_count: int,
+        expected_remaining_count: int,
+    ) -> None:
+        """Test register_revoke handles partition revocation correctly."""
+        caplog.set_level(logging.INFO)
+        cache = RetryScheduleCache()
+
+        # Create messages and add them to schedule
+        created_messages = []
+        for topic, partition, timestamp in scheduled_messages:
+            message = _make_message(
+                topic=topic,
+                partition=partition,
+                headers=[(TIMESTAMP_HEADER, int(timestamp).to_bytes(8, "big"))],
+            )
+            created_messages.append((message, timestamp))
+            # Manually add to schedule to bypass time checks
+            cache._RetryScheduleCache__schedule.setdefault(timestamp, []).append(
+                message
+            )
+
+        # Create TopicPartition objects for revocation
+        revoke_partitions = [
+            TopicPartition(topic, partition)
+            for topic, partition in partitions_to_revoke
+        ]
+
+        # Call register_revoke
+        cache.register_revoke(revoke_partitions)
+
+        # Verify log count
+        assert len(caplog.records) == expected_log_count
+
+        # Verify log content
+        if expected_log_count > 0:
+            for record in caplog.records:
+                assert "rebalancing" in record.message.lower()
+                assert "discarded" in record.message.lower()
+
+        # Count remaining messages in schedule
+        remaining_count = sum(
+            len(messages) for messages in cache._RetryScheduleCache__schedule.values()
+        )
+        assert remaining_count == expected_remaining_count
+
+        # Verify revoked messages are removed
+        revoked_set = set(partitions_to_revoke)
+        for message, timestamp in created_messages:
+            message_partition = (message.topic(), message.partition())
+            if message_partition in revoked_set:
+                # This message should be removed
+                if timestamp in cache._RetryScheduleCache__schedule:
+                    assert message not in cache._RetryScheduleCache__schedule[timestamp]
+            else:
+                # This message should remain
+                assert message in cache._RetryScheduleCache__schedule[timestamp]
 
 
 @pytest.mark.parametrize(

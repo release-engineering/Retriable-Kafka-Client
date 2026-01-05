@@ -137,6 +137,7 @@ class OffsetCache:
                 # Clean up committed
                 for committed in commit_candidates:
                     self.__to_commit[partition_info].remove(committed)
+        self._cleanup()
         return to_commit
 
     def process_message(self, message: Message) -> None:
@@ -176,39 +177,64 @@ class OffsetCache:
                     extra={"message_raw": message.value()},
                 )
                 return False
+            if message_offset not in self.__to_process[partition_info]:
+                LOGGER.warning(
+                    "Message processing was completed, but the partition to "
+                    "commit to was unassigned in the meantime. This message "
+                    "will be reprocessed by the newly assigned consumer."
+                )
+                return False
             self.__to_process[partition_info].remove(message_offset)
             self.__to_commit.setdefault(partition_info, set()).add(message_offset)
+        self._cleanup()
         return True
 
-    def register_revoke(self) -> None:
+    def _cleanup(self) -> None:
+        """
+        Clean up empty keys in the schedule (messages were deleted,
+        but the dictionary key could remain).
+        """
+        with self.__commit_lock:
+            for cache_to_clean in self.__to_process, self.__to_commit:
+                to_clean = set()
+                for partition_info, offsets in cache_to_clean.items():
+                    if not offsets:
+                        to_clean.add(partition_info)
+                for partition_info in to_clean:
+                    cache_to_clean.pop(partition_info, None)
+
+    def register_revoke(self, partitions: list[TopicPartition]) -> None:
         """
         Handle revocation of partitions. This happens during
         cluster rebalancing.
+        Args:
+            partitions: list of partitions that are revoked
         Returns: Nothing
         """
         if not self.has_cache():
             return
-        for partition_info, offsets in self.__to_commit.items():
-            LOGGER.warning(
-                "Messages in topic %s and partition %d with offsets %s failed "
-                "to be commited due to rebalancing. The message may be processed "
-                "again after rebalancing is complete.",
-                partition_info.topic,
-                partition_info.partition,
-                offsets,
-            )
-        for partition_info, offsets in self.__to_process.items():
-            LOGGER.warning(
-                "Messages in topic %s and partition %d with offset %s failed "
-                "to be fully processed due to rebalancing. The message may be "
-                "processed again after rebalancing is complete.",
-                partition_info.topic,
-                partition_info.partition,
-                offsets,
-            )
-        with self.__commit_lock:
-            self.__to_process.clear()
-            self.__to_commit.clear()
+        revoked_partition_keys = {
+            _PartitionInfo(partition=partition.partition, topic=partition.topic)
+            for partition in partitions
+        }
+        for partition_dict in (self.__to_commit, self.__to_process):
+            to_clear: set[_PartitionInfo] = set()
+            for partition_info, offsets in partition_dict.items():
+                if partition_info not in revoked_partition_keys:
+                    continue
+                LOGGER.warning(
+                    "Messages in topic %s and partition %d with offsets %s failed "
+                    "to be commited due to rebalancing. The message may be processed "
+                    "again after rebalancing is complete.",
+                    partition_info.topic,
+                    partition_info.partition,
+                    offsets,
+                )
+                to_clear.add(partition_info)
+            with self.__commit_lock:
+                for key_to_clear in to_clear:
+                    partition_dict.pop(key_to_clear, None)
+            self._cleanup()
 
     def has_cache(self) -> bool:
         """

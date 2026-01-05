@@ -21,7 +21,7 @@ import datetime
 import logging
 from collections import defaultdict
 
-from confluent_kafka import Message, KafkaException
+from confluent_kafka import Message, KafkaException, TopicPartition
 
 from .config import ProducerConfig, ConsumerConfig, ConsumeTopicConfig
 from .producer import BaseProducer
@@ -137,6 +137,57 @@ class RetryScheduleCache:
         )
         self.__schedule.setdefault(retry_timestamp, []).append(message)
         return True
+
+    def _cleanup(self) -> None:
+        """
+        Clean up empty keys in the schedule (messages were deleted,
+        but the dictionary key could remain).
+        """
+        keys_to_remove = set()
+        for timestamp, messages in self.__schedule.items():
+            if not messages:
+                keys_to_remove.add(timestamp)
+        for timestamp in keys_to_remove:
+            self.__schedule.pop(timestamp)
+
+    def register_revoke(self, partitions: list[TopicPartition]) -> None:
+        """
+        Handle revocation of partitions. This happens during
+        cluster rebalancing.
+        Args:
+            partitions: list of partitions that are revoked
+        Returns: Nothing
+        """
+        # Create a set of revoked partition information
+        # in the form of tuple with topic name and partition
+        # number for fast lookup
+        fast_lookup_partition_info = {
+            (partition.topic, partition.partition) for partition in partitions
+        }
+        for timestamp, messages in self.__schedule.items():
+            indexes_to_remove: list[int] = []
+            for idx, message in enumerate(messages):
+                if (
+                    message.topic(),
+                    message.partition(),
+                ) not in fast_lookup_partition_info:
+                    # Message is not in one of the revoked partitions
+                    continue
+                LOGGER.info(
+                    "Message from topic %s scheduled for processing at "
+                    "timestamp %s will be discarded without committing "
+                    "due to rebalancing. The next assigned consumer shall "
+                    "retry reprocessing it.",
+                    message.topic(),
+                    timestamp,
+                )
+                indexes_to_remove.insert(0, idx)
+            for idx in indexes_to_remove:
+                # Delete message from schedule, this is in a reverse
+                # order, ensured by inserting to index 0 instead of
+                # appending
+                messages.pop(idx)
+        self._cleanup()
 
 
 class RetryManager:

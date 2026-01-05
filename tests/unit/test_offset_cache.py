@@ -202,18 +202,22 @@ def test_offset_cache_schedule_commit_failure_rebalancing(
 
 
 @pytest.mark.parametrize(
-    "to_commit_data,to_process_data,expected_log_count,expected_log_content",
+    "to_commit_data,to_process_data,partitions_to_revoke,expected_log_count,expected_log_content,expected_remaining_commit,expected_remaining_process",
     [
         pytest.param(
             {},
             {},
+            [],
             0,
             [],
+            {},
+            {},
             id="both_empty_return_early_no_logs",
         ),
         pytest.param(
             {_PartitionInfo("test-topic", 0): {100, 101, 102}},
             {},
+            [TopicPartition("test-topic", 0)],
             1,
             [
                 "test-topic",
@@ -224,11 +228,14 @@ def test_offset_cache_schedule_commit_failure_rebalancing(
                 "commited",
                 "rebalancing",
             ],
+            {},
+            {},
             id="only_to_commit_has_data_log_uncommitted",
         ),
         pytest.param(
             {},
             {_PartitionInfo("test-topic", 1): {50, 51}},
+            [TopicPartition("test-topic", 1)],
             1,
             [
                 "test-topic",
@@ -239,7 +246,32 @@ def test_offset_cache_schedule_commit_failure_rebalancing(
                 "processed",
                 "rebalancing",
             ],
+            {},
+            {},
             id="only_to_process_has_data_log_unprocessed",
+        ),
+        pytest.param(
+            {
+                _PartitionInfo("topic-a", 0): {10, 11},
+                _PartitionInfo("topic-b", 0): {20, 21},
+                _PartitionInfo("topic-c", 0): {30, 31},
+            },
+            {
+                _PartitionInfo("topic-a", 0): {12},
+                _PartitionInfo("topic-b", 1): {22},
+            },
+            [TopicPartition("topic-a", 0), TopicPartition("topic-b", 1)],
+            3,  # 3 logs: 2 for topic-a partition 0 (to_commit + to_process), 1 for topic-b partition 1 (to_process)
+            [
+                "topic-a",
+                "topic-b",
+            ],
+            {
+                _PartitionInfo("topic-b", 0): {20, 21},
+                _PartitionInfo("topic-c", 0): {30, 31},
+            },
+            {},
+            id="partial_revoke_multiple_topics_mixed_partitions",
         ),
     ],
 )
@@ -247,8 +279,11 @@ def test_offset_cache_register_revoke(
     caplog: pytest.LogCaptureFixture,
     to_commit_data: dict,
     to_process_data: dict,
+    partitions_to_revoke: list[TopicPartition],
     expected_log_count: int,
     expected_log_content: list[str],
+    expected_remaining_commit: dict[_PartitionInfo, set[int]],
+    expected_remaining_process: dict[_PartitionInfo, set[int]],
 ) -> None:
     """Test register_revoke logs warnings for uncommitted/unprocessed messages."""
     caplog.set_level(logging.WARNING)
@@ -260,8 +295,8 @@ def test_offset_cache_register_revoke(
     for partition_info, offsets in to_process_data.items():
         cache._OffsetCache__to_process[partition_info].update(offsets)
 
-    # Call register_revoke
-    cache.register_revoke()
+    # Call register_revoke with partitions
+    cache.register_revoke(partitions_to_revoke)
 
     # Verify log count
     assert len(caplog.records) == expected_log_count
@@ -274,6 +309,59 @@ def test_offset_cache_register_revoke(
                 f"Expected '{expected_text}' in log messages: {log_messages}"
             )
 
-    # Verify caches are cleared
-    assert len(cache._OffsetCache__to_commit) == 0
-    assert len(cache._OffsetCache__to_process) == 0
+    # Verify revoked partitions are cleared
+    for partition in partitions_to_revoke:
+        pi = _PartitionInfo(partition.topic, partition.partition)
+        # Only check if it was tracked before revocation
+        if pi in to_commit_data or pi in to_process_data:
+            assert pi not in cache._OffsetCache__to_commit
+            assert pi not in cache._OffsetCache__to_process
+
+    # Verify non-revoked partitions remain in cache
+    for partition_info, expected_offsets in expected_remaining_commit.items():
+        assert cache._OffsetCache__to_commit[partition_info] == expected_offsets
+
+    for partition_info, expected_offsets in expected_remaining_process.items():
+        assert cache._OffsetCache__to_process[partition_info] == expected_offsets
+
+
+def test_offset_cache_schedule_commit_offset_not_in_partition(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """
+    Test schedule_commit when partition exists but the specific offset doesn't.
+    Happens when a partition was unassigned during the processing.
+    """
+    caplog.set_level(logging.WARNING)
+    cache = OffsetCache()
+
+    # Create a mock message
+    mock_message = MagicMock(
+        spec=Message,
+        topic=lambda: "test-topic",
+        partition=lambda: 0,
+        offset=lambda: 42,
+        value=lambda: b'{"test": "data"}',
+    )
+
+    partition_info = _PartitionInfo("test-topic", 0)
+
+    # Add partition but with DIFFERENT offsets (not including 42)
+    cache._OffsetCache__to_process[partition_info] = {100, 101, 102}
+
+    # Try to schedule commit for offset 42 which doesn't exist in the partition
+    result = cache.schedule_commit(mock_message)
+
+    # Verify failure
+    assert result is False
+
+    # Verify warning was logged
+    assert len(caplog.records) == 1
+    assert caplog.records[0].levelname == "WARNING"
+    assert "partition to commit to was unassigned" in caplog.records[0].message
+
+    # Verify the offset was NOT added to to_commit
+    assert 42 not in cache._OffsetCache__to_commit.get(partition_info, set())
+
+    # Verify original offsets remain in to_process
+    assert cache._OffsetCache__to_process[partition_info] == {100, 101, 102}
