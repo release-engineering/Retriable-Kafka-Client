@@ -16,6 +16,15 @@ processing. Each consumer can consume from multiple topics and processes
 the messages from these topics by a single callable. The callable must be
 specified by the user of this library.
 
+The library also ensures exactly-once processing when used correctly.
+To ensure this, the tasks should take short enough time that all
+of them finish before the cluster forces rebalancing. The library tries to
+finish everything before the rebalance while stopping additional non-started
+tasks. The default timeout for each task to finish is 30 seconds, but can be
+changed. Kafka cluster behavior change may also be needed with longer tasks.
+This behavior only appears during rebalancing and graceful stopping of the
+consumer.
+
 ### Fault-tolerance
 
 Each consumer accepts configuration with retry topics. A retry topic is
