@@ -10,7 +10,7 @@ from confluent_kafka import Message, KafkaException, TopicPartition, KafkaError
 
 from retriable_kafka_client import BaseConsumer, ConsumerConfig
 from retriable_kafka_client.config import ConsumeTopicConfig
-from retriable_kafka_client.offset_cache import _PartitionInfo
+from retriable_kafka_client.consumer_tracking import _PartitionInfo as PartitionInfo
 
 
 @pytest.fixture
@@ -150,19 +150,23 @@ def test_consumer_stop(
     # Mock the executor.map to avoid actually calling it
     base_consumer._executor.map = MagicMock()
 
-    # Pre-fill the offset cache
-    partition_info = _PartitionInfo("test-topic", 0)
-    offset_cache = base_consumer._BaseConsumer__offset_cache
-    offset_cache._OffsetCache__to_commit[partition_info].update({100, 101, 102})
+    # Pre-fill the tracking manager
+    partition_info = PartitionInfo("test-topic", 0)
+    tracking_manager = base_consumer._BaseConsumer__tracking_manager
+    tracking_manager._TrackingManager__to_commit[partition_info].update({100, 101, 102})
 
     assert base_consumer._BaseConsumer__stop_flag is False
-    assert offset_cache.has_cache() is True
+    # Verify cache has data
+    assert len(tracking_manager._TrackingManager__to_commit[partition_info]) == 3
 
     base_consumer.stop()
 
     assert base_consumer._BaseConsumer__stop_flag is True
-    # Verify cache was drained
-    assert offset_cache.has_cache() is False
+    # Verify cache was drained - to_commit should be empty after commits
+    assert (
+        len(tracking_manager._TrackingManager__to_commit.get(partition_info, set()))
+        == 0
+    )
     # Verify commit was called to drain the cache
     mock_consumer.commit.assert_called()
 
@@ -307,12 +311,18 @@ def test_perform_commits_logic(
     mock_consumer = base_consumer._consumer
     mock_consumer.commit = MagicMock()
 
-    partition_info = _PartitionInfo("test-topic", 0)
-    offset_cache = base_consumer._BaseConsumer__offset_cache
+    partition_info = PartitionInfo("test-topic", 0)
+    tracking_manager = base_consumer._BaseConsumer__tracking_manager
     if to_process_offsets:
-        offset_cache._OffsetCache__to_process[partition_info].update(to_process_offsets)
+        # __to_process now stores dict[int, Future]
+        for offset in to_process_offsets:
+            tracking_manager._TrackingManager__to_process[partition_info][offset] = (
+                MagicMock(spec=Future)
+            )
     if to_commit_offsets:
-        offset_cache._OffsetCache__to_commit[partition_info].update(to_commit_offsets)
+        tracking_manager._TrackingManager__to_commit[partition_info].update(
+            to_commit_offsets
+        )
 
     base_consumer._BaseConsumer__perform_commits()
 
@@ -325,27 +335,28 @@ def test_perform_commits_logic(
 
 
 @pytest.mark.parametrize(
-    "has_cache,to_commit_offsets,expected_offset",
+    "to_commit_offsets,expected_offset",
     [
-        pytest.param(True, {100, 101, 102}, 103, id="cache_filled_commits_offsets"),
-        pytest.param(False, set(), None, id="cache_empty_no_commit"),
+        pytest.param({100, 101, 102}, 103, id="cache_filled_commits_offsets"),
+        pytest.param(set(), None, id="cache_empty_no_commit"),
     ],
 )
 def test_on_revoke(
     base_consumer: BaseConsumer,
-    has_cache: bool,
     to_commit_offsets: set[int],
     expected_offset: int | None,
 ) -> None:
-    """Test __on_revoke callback behavior with and without cache."""
+    """Test __on_revoke callback behavior."""
     mock_consumer = base_consumer._consumer
     mock_consumer.commit = MagicMock()
 
-    # Pre-fill the cache if needed
-    if has_cache:
-        partition_info = _PartitionInfo("test-topic", 0)
-        offset_cache = base_consumer._BaseConsumer__offset_cache
-        offset_cache._OffsetCache__to_commit[partition_info].update(to_commit_offsets)
+    # Pre-fill the tracking manager if needed
+    partition_info = PartitionInfo("test-topic", 0)
+    tracking_manager = base_consumer._BaseConsumer__tracking_manager
+    if to_commit_offsets:
+        tracking_manager._TrackingManager__to_commit[partition_info].update(
+            to_commit_offsets
+        )
 
     # Create mock partitions list (required by on_revoke signature)
     mock_partitions = [TopicPartition("test-topic", 0)]
@@ -353,16 +364,26 @@ def test_on_revoke(
     # Call the private __on_revoke method
     base_consumer._BaseConsumer__on_revoke(mock_consumer, mock_partitions)
 
-    if has_cache:
-        # Should commit and register revoke
+    if to_commit_offsets:
+        # Should commit the offsets
         mock_consumer.commit.assert_called_once()
         call_args = mock_consumer.commit.call_args
         assert call_args[1]["offsets"][0].offset == expected_offset
-        # Cache should be cleared after register_revoke
-        assert not base_consumer._BaseConsumer__offset_cache.has_cache()
+        # to_commit should be cleared after commit
+        assert (
+            len(tracking_manager._TrackingManager__to_commit.get(partition_info, set()))
+            == 0
+        )
     else:
         # Should not commit when cache is empty
         mock_consumer.commit.assert_not_called()
+
+
+def test_ack_message_cancelled(base_consumer: BaseConsumer) -> None:
+    mock_future = MagicMock(spec=Future)
+    mock_future.cancelled = lambda: True
+    base_consumer._BaseConsumer__ack_message(MagicMock(), mock_future)
+    mock_future.exception.assert_not_called()
 
 
 def test_ack_message_with_exception(
@@ -372,13 +393,9 @@ def test_ack_message_with_exception(
     """Test __ack_message when the future raises an exception."""
     caplog.set_level(logging.ERROR)
 
-    # Mock the semaphore
-    mock_semaphore = MagicMock()
-    base_consumer._BaseConsumer__semaphore = mock_semaphore
-
-    # Mock the offset cache
-    mock_offset_cache = MagicMock()
-    base_consumer._BaseConsumer__offset_cache = mock_offset_cache
+    # Mock the tracking manager
+    mock_tracking_manager = MagicMock()
+    base_consumer._BaseConsumer__tracking_manager = mock_tracking_manager
 
     # Mock the retry manager
     mock_retry_manager = MagicMock()
@@ -397,15 +414,13 @@ def test_ack_message_with_exception(
     test_exception = ValueError("Test processing error")
     mock_future = MagicMock(spec=Future)
     mock_future.exception.return_value = test_exception
+    mock_future.cancelled.return_value = False
 
     # Call __ack_message
     base_consumer._BaseConsumer__ack_message(mock_message, mock_future)
 
-    # Verify semaphore was released
-    mock_semaphore.release.assert_called_once()
-
-    # Verify offset cache schedule_commit was called
-    mock_offset_cache.schedule_commit.assert_called_once_with(mock_message)
+    # Verify tracking manager schedule_commit was called
+    mock_tracking_manager.schedule_commit.assert_called_once_with(mock_message)
 
     # Verify retry manager was called to resend the message
     mock_retry_manager.resend_message.assert_called_once_with(mock_message)

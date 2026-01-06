@@ -70,6 +70,9 @@ class ConsumerConfig(_CommonConfig):
         kafka_hosts: list of Kafka node URLs to connect to
         topics: list of configuration for topics and their
             retry policies
+        cancel_future_wait_time: Maximal time to wait fot a task
+            to finish before discarding it on rebalance or soft shutdown.
+            Doesn't affect tasks which are ran in normal circumstances.
         username: consumer username
         password: consumer password
         additional_settings: additional settings to pass directly to Kafka producer
@@ -80,3 +83,4 @@ class ConsumerConfig(_CommonConfig):
     group_id: str
     target: Callable[[dict[str, Any]], Any]
     topics: list[ConsumeTopicConfig] = field(default_factory=list)
+    cancel_future_wait_time: float = field(default=30.0)

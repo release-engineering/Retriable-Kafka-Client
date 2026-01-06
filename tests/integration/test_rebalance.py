@@ -66,16 +66,11 @@ async def test_rebalance_mid_processing_exactly_once(
         with scaffold.tracker.lock:
             messages_after_rebalance = len(scaffold.tracker.success_counts)
 
-        print(f"  After rebalance: {messages_after_rebalance} messages processed")
-        print("  Both consumers now processing in parallel...")
-
-        def _ensure_success(_: dict[int, int], success_counts: dict[int, int]) -> bool:
-            if len(success_counts) == total_messages:
-                return True
-            return False
+        print(f"After rebalance: {messages_after_rebalance} messages processed")
+        print("Both consumers now processing in parallel...")
 
         # Wait for all messages to be processed by both consumers
-        success = await scaffold.wait_for(_ensure_success)
+        success = await scaffold.wait_for_success()
 
         # Get final statistics
         with scaffold.tracker.lock:
@@ -94,4 +89,4 @@ async def test_rebalance_mid_processing_exactly_once(
         consumer1.stop()
         consumer2.stop()
 
-        assert success, "Not all messages were processed!"
+        assert success, "Not all messages were processed exactly once!"

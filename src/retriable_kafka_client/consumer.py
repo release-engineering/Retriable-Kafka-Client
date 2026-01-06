@@ -5,14 +5,13 @@ import logging
 import sys
 from concurrent.futures import Executor, Future
 from concurrent.futures.process import BrokenProcessPool
-from multiprocessing import Semaphore
 from typing import Any
 
 from confluent_kafka import Consumer, Message, KafkaException, TopicPartition
 
 from .kafka_utils import message_to_partition
 from .kafka_settings import KafkaOptions, DEFAULT_CONSUMER_SETTINGS
-from .offset_cache import OffsetCache
+from .consumer_tracking import TrackingManager
 from .config import ConsumerConfig
 from .retry_utils import (
     RetryManager,
@@ -79,14 +78,14 @@ class BaseConsumer:
         self.__validate()
         # Executor for target tasks
         self._executor = executor
-        # Used to handle max concurrency
-        self.__semaphore = Semaphore(max_concurrency)
         # Used for Kafka connections
         self.__consumer_object: Consumer | None = None
         # Used for stopping the consumption
         self.__stop_flag: bool = False
-        # Store information about offsets
-        self.__offset_cache = OffsetCache()
+        # Store information about offsets and tasks
+        self.__tracking_manager = TrackingManager(
+            max_concurrency, config.cancel_future_wait_time
+        )
         # Manage re-sending messages to retry topics
         self.__retry_manager = RetryManager(config)
         # Store information about pending retried messages
@@ -117,21 +116,20 @@ class BaseConsumer:
     def __perform_commits(self) -> None:
         """
         Commit anything that is awaiting to be committed.
-        Returns: Nothing
         """
-        committable = self.__offset_cache.pop_committable()
+        committable = self.__tracking_manager.pop_committable()
         if committable:
             self._consumer.commit(offsets=committable, asynchronous=False)
 
     def __on_revoke(self, _: Consumer, partitions: list[TopicPartition]) -> None:
         """
         Callback when partitions are revoked during rebalancing.
+        This is called in the same thread as poll, directly by the underlying
+        Kafka library.
         """
-        if not self.__offset_cache.has_cache():
-            return
         self.__schedule_cache.register_revoke(partitions)
+        self.__tracking_manager.register_revoke(partitions)
         self.__perform_commits()
-        self.__offset_cache.register_revoke(partitions)
 
     def __ack_message(self, message: Message, finished_future: Future) -> None:
         """
@@ -142,6 +140,8 @@ class BaseConsumer:
             message: The Kafka message to be acknowledged
             finished_future: The finished future which caused this call
         """
+        if finished_future.cancelled():
+            return
         try:
             if problem := finished_future.exception():
                 LOGGER.error(
@@ -151,8 +151,7 @@ class BaseConsumer:
                 )
                 self.__retry_manager.resend_message(message)
         finally:
-            self.__semaphore.release()
-            self.__offset_cache.schedule_commit(message)
+            self.__tracking_manager.schedule_commit(message)
 
     ### Retry methods ###
 
@@ -199,9 +198,8 @@ class BaseConsumer:
             LOGGER.exception("Decoding error: not a valid JSON: %s", message.value())
             self._consumer.commit(message)
             return None
-        self.__offset_cache.process_message(message)
-        self.__semaphore.acquire()
         future = self._executor.submit(self._config.target, message_data)
+        self.__tracking_manager.process_message(message, future)
         # The semaphore is released within this callback
         future.add_done_callback(lambda res: self.__ack_message(message, res))
         return future
@@ -265,8 +263,8 @@ class BaseConsumer:
         """
         LOGGER.debug("Stopping retriable consumer...")
         self.__stop_flag = True
-        while self.__offset_cache.has_cache():
-            self.__perform_commits()
+        self.__tracking_manager.register_revoke()
+        self.__perform_commits()
         try:
             LOGGER.debug("Shutting down Kafka consumer...")
             self._consumer.close()
