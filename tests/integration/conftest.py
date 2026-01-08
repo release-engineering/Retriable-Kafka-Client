@@ -47,8 +47,6 @@ def wait_for_kafka(admin_client: AdminClient) -> None:
             metadata = admin_client.list_topics(timeout=5)
             if metadata.brokers:
                 return
-        except KafkaException:
-            pass
         except Exception:
             pass
 

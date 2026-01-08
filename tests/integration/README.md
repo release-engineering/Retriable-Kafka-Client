@@ -12,7 +12,7 @@ It bundles topic creation, producer, consumer, and message tracking together.
 
 ```python
 from retriable_kafka_client import ConsumeTopicConfig
-from tests.integration.integration_utils import IntegrationTestScaffold, ScaffoldConfig
+from .integration_utils import IntegrationTestScaffold, ScaffoldConfig
 
 
 @pytest.mark.asyncio

@@ -375,8 +375,8 @@ def test_retry_manager_validation_valid_configs(
 ) -> None:
     """Test that RetryManager accepts valid configurations."""
     config = _make_config(topics)
-    manager = RetryManager(config)
-    assert manager is not None
+    # We test no assertion error is raised
+    RetryManager(config)
 
 
 @pytest.mark.parametrize(

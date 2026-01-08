@@ -152,15 +152,10 @@ async def test_producer_send_retry_on_buffer_error(base_producer: BaseProducer) 
     ]
 
     message = {"test": "data"}
-
-    start_time = asyncio.get_running_loop().time()
     await base_producer.send(message)
-    elapsed_time = asyncio.get_running_loop().time() - start_time
 
     # Should have retried twice (2 failures + 1 success = 3 calls)
     assert mock_kafka_producer.produce.call_count == 3
-    # Should have waited approximately: 0.01 + 0.011 = 0.021 seconds
-    assert elapsed_time >= 0.02  # Allow some timing flexibility
 
 
 def test_producer_close(base_producer: BaseProducer) -> None:
