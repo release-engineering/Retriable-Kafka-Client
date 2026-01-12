@@ -9,7 +9,6 @@ import time
 from typing import Any
 
 import pytest
-from confluent_kafka import KafkaException
 from confluent_kafka.admin import AdminClient
 from retriable_kafka_client.kafka_settings import KafkaOptions
 

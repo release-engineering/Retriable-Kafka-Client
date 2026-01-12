@@ -15,6 +15,7 @@ class KafkaOptions:
     SECURITY_PROTO = "security.protocol"
     USERNAME = "sasl.username"
     PASSWORD = "sasl.password"
+    PARTITION_ASSIGNMENT_STRAT = "partition.assignment.strategy"
 
 
 _DEFAULT_COMMON_SETTINGS = {
@@ -25,6 +26,7 @@ _DEFAULT_COMMON_SETTINGS = {
 DEFAULT_CONSUMER_SETTINGS = {
     KafkaOptions.AUTO_COMMIT: False,
     KafkaOptions.OFFSET_RESET: "earliest",
+    KafkaOptions.PARTITION_ASSIGNMENT_STRAT: "cooperative-sticky",
     **_DEFAULT_COMMON_SETTINGS,
 }
 
