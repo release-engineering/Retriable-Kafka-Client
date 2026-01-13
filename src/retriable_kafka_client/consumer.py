@@ -5,14 +5,18 @@ import logging
 import sys
 from concurrent.futures import Executor, Future
 from concurrent.futures.process import BrokenProcessPool
-from multiprocessing import Semaphore
 from typing import Any
 
 from confluent_kafka import Consumer, Message, KafkaException, TopicPartition
 
+from .kafka_utils import message_to_partition
 from .kafka_settings import KafkaOptions, DEFAULT_CONSUMER_SETTINGS
-from .offset_cache import OffsetCache
-from .types import ConsumerConfig
+from .consumer_tracking import TrackingManager
+from .config import ConsumerConfig
+from .retry_utils import (
+    RetryManager,
+    RetryScheduleCache,
+)
 
 LOGGER = logging.getLogger(__name__)
 
@@ -30,43 +34,68 @@ class BaseConsumer:
     received before them may not be processed yet. And we always want
     to commit only the latest processed message that is not preceded
     by any non-processed (pending) message.
+
+    This consumer is also capable of using a retry mechanism, it uses
+    RetryManager to get the correct producer object and resend the message
+    to a retry topic. This message is marked with a special header
+    that is checked in each consume. The header contains a timestamp
+    and each message with this timestamp will only be consumed after
+    that timestamp passes. To track messages pending for processing
+    due to this timestamping, the class RetryScheduleCache is used.
+
+    Consumption is stopped for each partition where a blocking message
+    appears to spare local memory. Consumption is resumed when the blocking
+    timestamp passes.
     """
+
+    # pylint: disable=too-many-instance-attributes
+
+    def __validate(self) -> None:
+        base_topic_names = {
+            retry_config.base_topic for retry_config in self._config.topics
+        }
+        assert len(base_topic_names) == len(
+            [retry_config.base_topic for retry_config in self._config.topics]
+        ), "Cannot consume twice from the same topic!"
 
     def __init__(
         self,
         config: ConsumerConfig,
         executor: Executor,
         max_concurrency: int = 16,
-        **additional_settings: Any,
     ):
         """
-        Initialize a Consumer.
-        :param config: The configuration object
-        :param executor: The executor pool used by this consumer.
-        :param max_concurrency: The maximum number of messages that can be
-            submitted to the executor from this consumer at the same time.
-        :param additional_settings: Additional settings to pass to the confluent_kafka
-            consumer. This overrides the provided defaults from
-            .kafka_settings.DEFAULT_CONSUMER_SETTINGS
+        Initialize a consumer.
+        Args:
+            config: The configuration object
+            executor: The executor pool used by this consumer.
+            max_concurrency: The maximum number of messages that can be
+                submitted to the executor from this consumer at the same time.
         """
+        # Consumer configuration
         self._config = config
+        # Validate the configuration
+        self.__validate()
+        # Executor for target tasks
         self._executor = executor
-        # Used to handle max concurrency
-        self.__semaphore = Semaphore(max_concurrency)
         # Used for Kafka connections
         self.__consumer_object: Consumer | None = None
         # Used for stopping the consumption
         self.__stop_flag: bool = False
-        # Override settings for Kafka Consumer object
-        self.__additional_settings = additional_settings
-        # Store information about offsets
-        self.__offset_cache = OffsetCache()
+        # Store information about offsets and tasks
+        self.__tracking_manager = TrackingManager(
+            max_concurrency, config.cancel_future_wait_time
+        )
+        # Manage re-sending messages to retry topics
+        self.__retry_manager = RetryManager(config)
+        # Store information about pending retried messages
+        self.__schedule_cache = RetryScheduleCache()
 
     @property
     def _consumer(self) -> Consumer:
         """
         Create the consumer object, keep it in memory.
-        :return: Kafka consumer object.
+        Returns: Kafka consumer object.
         """
         if not self.__consumer_object:
             config_dict = {
@@ -76,7 +105,7 @@ class BaseConsumer:
                 KafkaOptions.GROUP_ID: self._config.group_id,
                 **DEFAULT_CONSUMER_SETTINGS,
             }
-            config_dict.update(self.__additional_settings)
+            config_dict.update(self._config.additional_settings)
             self.__consumer_object = Consumer(
                 config_dict,
             )
@@ -85,36 +114,65 @@ class BaseConsumer:
     ### Offset-related methods ###
 
     def __perform_commits(self) -> None:
-        committable = self.__offset_cache.pop_committable()
+        """
+        Commit anything that is awaiting to be committed.
+        """
+        committable = self.__tracking_manager.pop_committable()
         if committable:
             self._consumer.commit(offsets=committable, asynchronous=False)
 
-    def __on_revoke(self, _: Consumer, __: list[TopicPartition]) -> None:
+    def __on_revoke(self, _: Consumer, partitions: list[TopicPartition]) -> None:
         """
         Callback when partitions are revoked during rebalancing.
+        This is called in the same thread as poll, directly by the underlying
+        Kafka library.
         """
-        if not self.__offset_cache.has_cache():
-            return
+        self.__schedule_cache.register_revoke(partitions)
+        self.__tracking_manager.register_revoke(partitions)
         self.__perform_commits()
-        self.__offset_cache.register_revoke()
 
     def __ack_message(self, message: Message, finished_future: Future) -> None:
         """
         Private method only ever intended to be used from within
         _process_message(). It commits offsets and releases
         semaphore for processing next messages.
-        :param message: The Kafka message to be acknowledged
-        :param finished_future:
-        :return: Nothing
+        Args:
+            message: The Kafka message to be acknowledged
+            finished_future: The finished future which caused this call
         """
-        self.__semaphore.release()
-        self.__offset_cache.schedule_commit(message)
-        if problem := finished_future.exception():
-            LOGGER.error(
-                "Message could not be processed! Message: %s.",
-                message.value(),
-                exc_info=problem,
+        if finished_future.cancelled():
+            return
+        try:
+            if problem := finished_future.exception():
+                LOGGER.error(
+                    "Message could not be processed! Message: %s.",
+                    message.value(),
+                    exc_info=problem,
+                )
+                self.__retry_manager.resend_message(message)
+        finally:
+            self.__tracking_manager.schedule_commit(message)
+
+    ### Retry methods ###
+
+    def __process_retried_messages_from_schedule(self) -> None:
+        """
+        Perform all actions that are scheduled for processing and
+        their schedule has passed already
+        """
+        reprocessable = self.__schedule_cache.pop_reprocessable()
+        for message in reprocessable:
+            LOGGER.debug(
+                "Retrying processing message from topic: %s",
+                message.topic(),
+                extra={"raw_message": message.value()},
             )
+            self._process_message(message)
+        # Resume consumption from the topic, the latest message's schedule
+        # has passed
+        self._consumer.resume(
+            [message_to_partition(message) for message in reprocessable]
+        )
 
     ### Main processing function ###
 
@@ -122,15 +180,12 @@ class BaseConsumer:
         """
         Process this message with the specified target function
         with usage of the executor.
-        :param message: Kafka message object. Only its value will be used
-            for deserialization and passing to the target function.
-        :return: Future of the target execution if the message can be processed.
+        Args:
+            message: Kafka message object. Only its value will be used
+                for deserialization and passing to the target function.
+        Returns: Future of the target execution if the message can be processed.
             None otherwise.
         """
-        if error := message.error():
-            if error.retriable():
-                LOGGER.debug("Consumer error: %s", error.str())
-                return None
         message_value = message.value()
         if not message_value:
             # Discard empty messages
@@ -143,9 +198,8 @@ class BaseConsumer:
             LOGGER.exception("Decoding error: not a valid JSON: %s", message.value())
             self._consumer.commit(message)
             return None
-        self.__offset_cache.process_message(message)
-        self.__semaphore.acquire()
         future = self._executor.submit(self._config.target, message_data)
+        self.__tracking_manager.process_message(message, future)
         # The semaphore is released within this callback
         future.add_done_callback(lambda res: self.__ack_message(message, res))
         return future
@@ -156,15 +210,36 @@ class BaseConsumer:
         """
         Run the consumer. This starts consuming messages from kafka
         and their processing within the process pool.
-        :return: Nothing
         """
-        self._consumer.subscribe(self._config.topics, on_revoke=self.__on_revoke)
+        plain_topics = [topic.base_topic for topic in self._config.topics]
+        retry_topics = [
+            topic.retry_topic
+            for topic in self._config.topics
+            if topic.retry_topic is not None
+        ]
+        self._consumer.subscribe(
+            [*plain_topics, *retry_topics], on_revoke=self.__on_revoke
+        )
         while not self.__stop_flag:
             try:
+                # First resolve local messages waiting in schedule
+                self.__process_retried_messages_from_schedule()
+                # Then poll Kafka messages
                 msg = self._consumer.poll(1)
-                if not msg:
+                if msg is None:
+                    LOGGER.debug(
+                        "No message received currently.",
+                    )
                     # This allows interrupting the script
                     # each second
+                    continue
+                if error := msg.error():
+                    LOGGER.debug("Consumer error: %s", error.str())
+                    continue
+                LOGGER.debug("Consumer received message at offset: %s", msg.offset())
+                if self.__schedule_cache.add_if_applicable(msg):
+                    # Skip messages not eligible for execution yet, schedule them
+                    self._consumer.pause([message_to_partition(msg)])
                     continue
                 self._process_message(msg)
                 self.__perform_commits()
@@ -185,22 +260,13 @@ class BaseConsumer:
     def stop(self) -> None:
         """
         Gracefully stop the consumer.
-        :return: Nothing
         """
-        LOGGER.debug("Stopping consumer...")
+        LOGGER.debug("Stopping retriable consumer...")
         self.__stop_flag = True
-        while self.__offset_cache.has_cache():
-            self.__perform_commits()
+        self.__tracking_manager.register_revoke()
+        self.__perform_commits()
         try:
-            LOGGER.debug("Unsubscribing from topics: %s", self._config.topics)
-            self._consumer.unsubscribe()
-            try:
-                LOGGER.debug("Shutting down consumer...")
-                self._executor.map(self._consumer.close, tuple(), timeout=10)
-            except TimeoutError:  # pragma: no cover
-                # See https://github.com/confluentinc/confluent-kafka-python/issues/1667
-                LOGGER.warning(
-                    "Kafka consumer failed to close! Next reconnection may be slow!"
-                )
+            LOGGER.debug("Shutting down Kafka consumer...")
+            self._consumer.close()
         except (RuntimeError, KafkaException):  # pragma: no cover
             LOGGER.debug("Consumer already closed.")

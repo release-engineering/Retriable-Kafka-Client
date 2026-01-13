@@ -4,7 +4,7 @@ from concurrent.futures import ProcessPoolExecutor
 from threading import Thread
 from typing import Iterable
 
-from .types import ConsumerConfig
+from .config import ConsumerConfig
 from .consumer import BaseConsumer
 
 
@@ -20,7 +20,7 @@ class ConsumerThread(Thread):
     def stop(self) -> None:
         """
         Gracefully stop the consumer and wait for its thread to exit.
-        :return: Nothing.
+        Returns: Nothing.
         """
         self.consumer.stop()
         self.join()
@@ -30,10 +30,11 @@ def consume_topics(topics: Iterable[ConsumerConfig], max_workers: int):
     """
     Function for parallel consuming of multiple topics using executor pool
     for processing the messages and threads for dispatching the listeners.
-    :param topics: Collection of topic configs to consume. Each config
-        gets its own thread, which will not block the others.
-    :param max_workers:
-    :return:
+    Args:
+        topics: Collection of topic configs to consume. Each config
+            gets its own thread, which will not block the others.
+        max_workers: Maximum number of workers in pool for processing
+            messages.
     """
     executor = ProcessPoolExecutor(max_workers=max_workers)
     threads: list[ConsumerThread] = []

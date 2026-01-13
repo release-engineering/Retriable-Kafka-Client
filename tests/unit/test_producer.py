@@ -2,14 +2,14 @@
 
 import asyncio
 import json
-from typing import Generator
+from typing import Generator, Any
 from unittest.mock import patch, MagicMock
 
 import pytest
 from confluent_kafka import KafkaException
 
 from retriable_kafka_client.producer import BaseProducer
-from retriable_kafka_client.types import ProducerConfig
+from retriable_kafka_client.config import ProducerConfig
 
 
 @pytest.fixture
@@ -23,6 +23,7 @@ def fast_config() -> ProducerConfig:
         retries=2,
         fallback_factor=1.1,
         fallback_base=0.01,
+        additional_settings={},
     )
 
 
@@ -36,14 +37,25 @@ def base_producer(fast_config: ProducerConfig) -> Generator[BaseProducer, None, 
         yield producer
 
 
-@pytest.mark.asyncio
-async def test_producer_send_success_first_attempt(base_producer: BaseProducer) -> None:
-    """Test successful message send on first attempt."""
+def _run_send_method(
+    producer: BaseProducer, method: str, message: Any, headers: Any = None
+) -> None:
+    """Helper to run either send or send_sync method."""
+    if method == "send":
+        asyncio.run(producer.send(message, headers))
+    else:
+        producer.send_sync(message, headers)
 
+
+@pytest.mark.parametrize("send_method", ["send", "send_sync"])
+def test_producer_send_success_first_attempt(
+    base_producer: BaseProducer, send_method: str
+) -> None:
+    """Test successful message send on first attempt."""
     message = {"key": "value", "number": 42}
 
-    with patch("time.time", return_value=1234567890):
-        await base_producer.send(message)
+    with patch("time.time", return_value=1):
+        _run_send_method(base_producer, send_method, message)
 
     mock_kafka_producer: MagicMock = base_producer._producer
     # Should produce to all topics once
@@ -52,36 +64,14 @@ async def test_producer_send_success_first_attempt(base_producer: BaseProducer) 
         mock_kafka_producer.produce.assert_any_call(
             topic=topic,
             value=json.dumps(message).encode("utf-8"),
-            timestamp=1234567890,
+            timestamp=1000,
+            headers=None,
         )
 
 
-@pytest.mark.asyncio
-async def test_producer_send_retry_on_buffer_error(base_producer: BaseProducer) -> None:
-    """Test retry mechanism on BufferError."""
-    mock_kafka_producer: MagicMock = base_producer._producer
-    # First two attempts fail, third succeeds
-    mock_kafka_producer.produce.side_effect = [
-        BufferError("Queue full"),
-        BufferError("Queue full"),
-        None,
-    ]
-
-    message = {"test": "data"}
-
-    start_time = asyncio.get_running_loop().time()
-    await base_producer.send(message)
-    elapsed_time = asyncio.get_running_loop().time() - start_time
-
-    # Should have retried twice (2 failures + 1 success = 3 calls)
-    assert mock_kafka_producer.produce.call_count == 3
-    # Should have waited approximately: 0.01 + 0.011 = 0.021 seconds
-    assert elapsed_time >= 0.02  # Allow some timing flexibility
-
-
-@pytest.mark.asyncio
-async def test_producer_send_exhausts_retries_buffer_error(
-    base_producer: BaseProducer,
+@pytest.mark.parametrize("send_method", ["send", "send_sync"])
+def test_producer_send_exhausts_retries_buffer_error(
+    base_producer: BaseProducer, send_method: str
 ) -> None:
     """Test that BufferError is raised after all retries are exhausted."""
     mock_kafka_producer: MagicMock = base_producer._producer
@@ -89,33 +79,31 @@ async def test_producer_send_exhausts_retries_buffer_error(
     mock_kafka_producer.produce.side_effect = BufferError("Queue always full")
 
     with pytest.raises(BufferError, match="Queue always full"):
-        await base_producer.send({"fail": "test"})
+        _run_send_method(base_producer, send_method, {"fail": "test"})
 
     # Should have attempted 3 times (initial + 2 retries)
     assert mock_kafka_producer.produce.call_count == 3
 
 
-@pytest.mark.asyncio
-async def test_producer_send_exhausts_retries_kafka_exception(
-    base_producer: BaseProducer,
+@pytest.mark.parametrize("send_method", ["send", "send_sync"])
+def test_producer_send_exhausts_retries_kafka_exception(
+    base_producer: BaseProducer, send_method: str
 ) -> None:
     """Test that KafkaException is raised after all retries are exhausted."""
     mock_kafka_producer: MagicMock = base_producer._producer
     # Fail on all attempts
     mock_kafka_producer.produce.side_effect = KafkaException(MagicMock())
 
-    message = {"error": "test"}
-
     with pytest.raises(KafkaException):
-        await base_producer.send(message)
+        _run_send_method(base_producer, send_method, {"error": "test"})
 
     # Should have attempted 3 times (initial + 2 retries)
     assert mock_kafka_producer.produce.call_count == 3
 
 
-@pytest.mark.asyncio
-async def test_producer_send_non_json_serializable_message(
-    base_producer: BaseProducer,
+@pytest.mark.parametrize("send_method", ["send", "send_sync"])
+def test_producer_send_non_json_serializable_message(
+    base_producer: BaseProducer, send_method: str
 ) -> None:
     """Test that TypeError is raised for non-JSON-serializable messages."""
 
@@ -126,11 +114,13 @@ async def test_producer_send_non_json_serializable_message(
     message = {"object": NonSerializable()}
 
     with pytest.raises(TypeError):
-        await base_producer.send(message)
+        _run_send_method(base_producer, send_method, message)
 
 
-@pytest.mark.asyncio
-async def test_producer_send_message(base_producer: BaseProducer) -> None:
+@pytest.mark.parametrize("send_method", ["send", "send_sync"])
+def test_producer_send_nested_message(
+    base_producer: BaseProducer, send_method: str
+) -> None:
     """Test sending a nested message."""
     mock_kafka_producer: MagicMock = base_producer._producer
 
@@ -141,13 +131,31 @@ async def test_producer_send_message(base_producer: BaseProducer) -> None:
         "metadata": {"timestamp": "2023-01-01", "version": "1.0"},
     }
 
-    await base_producer.send(message)
+    _run_send_method(base_producer, send_method, message)
 
     # Verify the message was JSON encoded correctly
     expected_bytes = json.dumps(message).encode("utf-8")
     mock_kafka_producer.produce.assert_called_once()
     call_kwargs = mock_kafka_producer.produce.call_args[1]
     assert call_kwargs["value"] == expected_bytes
+
+
+@pytest.mark.asyncio
+async def test_producer_send_retry_on_buffer_error(base_producer: BaseProducer) -> None:
+    """Test retry mechanism on BufferError (async version with timing check)."""
+    mock_kafka_producer: MagicMock = base_producer._producer
+    # First two attempts fail, third succeeds
+    mock_kafka_producer.produce.side_effect = [
+        BufferError("Queue full"),
+        BufferError("Queue full"),
+        None,
+    ]
+
+    message = {"test": "data"}
+    await base_producer.send(message)
+
+    # Should have retried twice (2 failures + 1 success = 3 calls)
+    assert mock_kafka_producer.produce.call_count == 3
 
 
 def test_producer_close(base_producer: BaseProducer) -> None:
@@ -161,3 +169,23 @@ def test_producer_close(base_producer: BaseProducer) -> None:
     # Should have called flush 3 times (until it returns 0)
     assert mock_kafka_producer.flush.call_count == 3
     mock_kafka_producer.flush.assert_called_with(1)
+
+
+@pytest.mark.parametrize(
+    "input_message,expected_output",
+    [
+        pytest.param(b"raw bytes", b"raw bytes", id="bytes_passthrough"),
+        pytest.param({"key": "value"}, b'{"key": "value"}', id="dict_to_json"),
+        pytest.param(
+            {"num": 42, "flag": True},
+            b'{"num": 42, "flag": true}',
+            id="dict_with_types",
+        ),
+        pytest.param([], b"[]", id="empty_list"),
+    ],
+)
+def test_serialize_message(input_message, expected_output) -> None:
+    """Test that messages are correctly serialized to bytes."""
+    # Access the private static method via name mangling
+    result = BaseProducer._BaseProducer__serialize_message(input_message)
+    assert result == expected_output

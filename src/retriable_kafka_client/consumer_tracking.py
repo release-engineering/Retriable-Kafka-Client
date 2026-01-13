@@ -2,8 +2,9 @@
 
 import logging
 from collections import defaultdict
-from threading import Lock
-from typing import NamedTuple
+from concurrent.futures import Future
+from threading import Lock, Semaphore
+from typing import NamedTuple, Any
 
 from confluent_kafka import Message, TopicPartition
 
@@ -22,9 +23,10 @@ class _PartitionInfo(NamedTuple):
     @staticmethod
     def from_message(message: Message) -> "_PartitionInfo":
         """
-        Create a _PartitionInfo from a Kafka message.
-        :param message: Kafka message object
-        :return: hashable info about a partition
+        Create a PartitionInfo from a Kafka message.
+        Args:
+             message: Kafka message object
+        Returns: hashable info about a partition
         """
         message_topic = message.topic()
         message_partition = message.partition()
@@ -40,21 +42,22 @@ class _PartitionInfo(NamedTuple):
     def to_offset_info(self, offset: int) -> TopicPartition:
         """
         Create a Kafka-committable object using the provided offset.
-        :param offset: The offset to be committed. Make sure to commit
-            offset one higher than the latest processed message.
-        :return: The committable Kafka object
+        Args:
+            offset: The offset to be committed. Make sure to commit
+                offset one higher than the latest processed message.
+        Returns: The committable Kafka object
         """
         return TopicPartition(topic=self.topic, partition=self.partition, offset=offset)
 
 
-class OffsetCache:
+class TrackingManager:
     """
     Class for handling local memory containing offset information for correct
-    offsets committing.
+    offsets committing and tracks pending tasks (futures).
 
     Each message can be either:
     - untracked (committed or not polled)
-    - pending for processing
+    - pending for processing (then we also track its task object)
     - pending for committing
 
     Offsets are integers, specifying an index of each message in a cluster.
@@ -75,12 +78,17 @@ class OffsetCache:
     then we could even overwrite a bigger offset with a smaller one if the message
     process out of order, meaning that the latest message would be consumed again
     on consumer restart.
+
+    This tracking manager also blocks if too many tasks are submitted to it,
+    using semaphore. On task finish or cancellation, the semaphore is released.
     """
 
-    def __init__(self):
-        self.__to_process: dict[_PartitionInfo, set[int]] = defaultdict(set)
+    def __init__(self, concurrency: int, cancel_wait_time: float):
+        self.__to_process: dict[_PartitionInfo, dict[int, Future]] = defaultdict(dict)
         self.__to_commit: dict[_PartitionInfo, set[int]] = defaultdict(set)
-        self.__commit_lock = Lock()
+        self.__access_lock = Lock()  # For handling multithreaded access to this object
+        self.__semaphore = Semaphore(concurrency)
+        self.__cancel_wait_time = cancel_wait_time
 
     def pop_committable(self) -> list[TopicPartition]:
         """
@@ -92,10 +100,10 @@ class OffsetCache:
         Clean up memory after fetching relevant data (returned offsets should
         be immediately committed).
 
-        :return: list of committable message offsets
+        Returns: list of committable message offsets
         """
         to_commit = []
-        with self.__commit_lock:
+        with self.__access_lock:
             for partition_info, pending_to_commit in self.__to_commit.items():
                 if not pending_to_commit:
                     # Nothing to commit
@@ -135,80 +143,111 @@ class OffsetCache:
                 # Clean up committed
                 for committed in commit_candidates:
                     self.__to_commit[partition_info].remove(committed)
+        self._cleanup()
         return to_commit
 
-    def process_message(self, message: Message) -> None:
+    def process_message(self, message: Message, future: Future[Any]) -> None:
         """
         Mark message as pending for processing.
-        :param message: Kafka message object
-        :return: Nothing
+        Args:
+            message: Kafka message object
+            future: The task associated with whis message
         """
+        # We cannot really use context manager, the semaphore is released in
+        # future's callback or when the future is cancelled
+        self.__semaphore.acquire()  # pylint: disable=consider-using-with
         message_offset: int = message.offset()  # type: ignore[assignment]
-        with self.__commit_lock:
+        with self.__access_lock:
             # Mark the message as being processed
-            self.__to_process.setdefault(
-                _PartitionInfo.from_message(message), set()
-            ).add(message_offset)
+            self.__to_process[_PartitionInfo.from_message(message)][message_offset] = (
+                future
+            )
 
     def schedule_commit(self, message: Message) -> bool:
         """
-        Mark message as pending for committing.
-        :param message: Kafka message object
-        :return: True if successful (the message was previously marked
+        Mark message as pending for committing when its processing is fully done.
+        Args:
+            message: Kafka message object
+        Returns:
+            True if successful (the message was previously marked
             as pending for processing), False otherwise
         """
+        self.__semaphore.release()
         partition_info = _PartitionInfo.from_message(message)
         message_offset: int = message.offset()  # type: ignore[assignment]
-        with self.__commit_lock:
-            if partition_info not in self.__to_process:
-                # This can happen if rebalancing took place
-                LOGGER.warning(
-                    "Message in topic %s and partition %d with offset %s "
-                    "will not be committed. Rebalancing happened while this message was "
-                    "processed.",
-                    message.topic(),
-                    message.partition(),
-                    message_offset,
-                    extra={"message_raw": message.value()},
-                )
-                return False
-            self.__to_process[partition_info].remove(message_offset)
+        with self.__access_lock:
+            self.__to_process[partition_info].pop(message_offset, None)
             self.__to_commit.setdefault(partition_info, set()).add(message_offset)
+        self._cleanup()
         return True
 
-    def register_revoke(self) -> None:
+    def _cleanup(self) -> None:
+        """
+        Clean up empty keys in the schedule (messages were deleted,
+        but the dictionary key could remain).
+        """
+        with self.__access_lock:
+            for cache_to_clean in self.__to_process, self.__to_commit:
+                keys_to_pop = set()
+                for partition_info, offsets in cache_to_clean.items():
+                    if not offsets:
+                        keys_to_pop.add(partition_info)
+                for key in keys_to_pop:
+                    cache_to_clean.pop(key, None)
+
+    def _revoke_processing(
+        self, revoked_partitions: set[_PartitionInfo]
+    ) -> list[Future[Any]]:
+        """
+        Cancel all pending tracked futures related to the given partitions.
+        Clean up memory. Return all futures which cannot be cancelled.
+        Args:
+            revoked_partitions: revoked partitions (hashable)
+        Returns: list of futures that couldn't be cancelled, these
+            should be awaited later
+        """
+        to_await = []
+        keys_to_pop = set()
+        with self.__access_lock:
+            for partition_info, offset_dict in self.__to_process.items():
+                if partition_info not in revoked_partitions:
+                    continue
+                for future in offset_dict.values():
+                    if not future.cancel():
+                        to_await.append(future)
+                    else:
+                        self.__semaphore.release()
+                keys_to_pop.add(partition_info)
+            for key in keys_to_pop:
+                self.__to_process.pop(key, None)
+        self._cleanup()
+        return to_await
+
+    def register_revoke(self, partitions: list[TopicPartition] | None = None) -> None:
         """
         Handle revocation of partitions. This happens during
-        cluster rebalancing.
-        :return: Nothing
+        cluster rebalancing. During this time, cancel pending
+        tasks and await tasks in progress
+        Args:
+            partitions: list of partitions that are revoked.
+                If omitted, all partitions are revoked.
+        Returns: Nothing
         """
-        if not self.has_cache():
-            return
-        for partition_info, offsets in self.__to_commit.items():
-            LOGGER.warning(
-                "Messages in topic %s and partition %d with offsets %s failed "
-                "to be commited due to rebalancing. The message may be processed "
-                "again after rebalancing is complete.",
-                partition_info.topic,
-                partition_info.partition,
-                offsets,
-            )
-        for partition_info, offsets in self.__to_process.items():
-            LOGGER.warning(
-                "Messages in topic %s and partition %d with offset %s failed "
-                "to be fully processed due to rebalancing. The message may be "
-                "processed again after rebalancing is complete.",
-                partition_info.topic,
-                partition_info.partition,
-                offsets,
-            )
-        with self.__commit_lock:
-            self.__to_process.clear()
-            self.__to_commit.clear()
-
-    def has_cache(self) -> bool:
-        """
-        Determine if there is anything pending to process or to commit.
-        :return: True if there is cache, False otherwise
-        """
-        return any(self.__to_process.values()) or any(self.__to_commit.values())
+        if partitions is None:
+            revoked_partition_keys = set(self.__to_process.keys())
+        else:
+            revoked_partition_keys = {
+                _PartitionInfo(partition=partition.partition, topic=partition.topic)
+                for partition in partitions
+            }
+        pending_futures = self._revoke_processing(revoked_partition_keys)
+        for future in pending_futures:
+            try:
+                future.result(timeout=self.__cancel_wait_time)
+            except TimeoutError:
+                LOGGER.error(
+                    "Timeout waiting for processing of in-flight message ",
+                )
+            except Exception:  # pylint: disable=broad-exception-caught
+                # Exceptions are already handled in __ack_message
+                pass
