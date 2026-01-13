@@ -19,11 +19,11 @@ specified by the user of this library.
 The library also ensures exactly-once processing when used correctly.
 To ensure this, the tasks should take short enough time that all
 of them finish before the cluster forces rebalancing. The library tries to
-finish everything before the rebalance while stopping additional non-started
-tasks. The default timeout for each task to finish is 30 seconds, but can be
-changed. Kafka cluster behavior change may also be needed with longer tasks.
-This behavior only appears during rebalancing and graceful stopping of the
-consumer.
+finish tasks from revoked partitions before the rebalance while stopping
+additional non-started tasks. The default timeout for each task to finish is
+30 seconds, but can be changed. Kafka cluster behavior change may also be 
+needed with longer tasks. This behavior only appears during rebalancing and 
+graceful stopping of the consumer.
 
 ### Fault-tolerance
 
@@ -42,6 +42,10 @@ specified timestamp passes. The message will not be processed before the
 timestamp, it can only gather delay (depending on the occupation of the
 worker pool). Once the message is sent to the pool for re-processing, the
 consumption of the blocked partition is resumed.
+
+This whole mechanism **does not ensure message ordering**. When a message is
+sent to be retried, another message processing from the same topic is still
+unblocked.
 
 ## Local testing
 
