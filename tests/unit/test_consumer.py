@@ -289,16 +289,16 @@ def test_consumer_run_handles_broken_process_pool(
 @pytest.mark.parametrize(
     "to_process_offsets,to_commit_offsets,should_commit,expected_offset",
     [
-        pytest.param(set(), {100, 101}, True, 102, id="no_processing_can_commit"),
+        pytest.param(set(), {100, 101}, True, 101, id="no_processing_can_commit"),
         pytest.param(
             {50}, {100, 101}, False, None, id="older_processing_blocks_newer_commits"
         ),
         pytest.param(
             {100}, {100, 101}, False, None, id="processing_same_offset_blocks_commit"
         ),
-        pytest.param({70}, {50, 60}, True, 61, id="partial_commit_below_processing"),
+        pytest.param({70}, {50, 60}, True, 60, id="partial_commit_below_processing"),
         pytest.param(
-            {100}, {50, 60}, True, 61, id="commit_older_while_processing_newer"
+            {100}, {50, 60}, True, 60, id="commit_older_while_processing_newer"
         ),
         pytest.param(set(), set(), False, None, id="empty_queues_nothing_to_commit"),
     ],
@@ -337,10 +337,21 @@ def test_perform_commits_logic(
         mock_consumer.commit.assert_not_called()
 
 
+def test_perform_commits_failed(base_consumer: BaseConsumer) -> None:
+    mock_consumer = base_consumer._consumer
+    mock_consumer.commit = MagicMock(side_effect=KafkaException())
+
+    partition_info = PartitionInfo("test-topic", 0)
+    tracking_manager = base_consumer._BaseConsumer__tracking_manager
+    tracking_manager._TrackingManager__to_commit[partition_info] = {1}
+    base_consumer._BaseConsumer__perform_commits()
+    assert tracking_manager._TrackingManager__to_commit[partition_info] == {1}
+
+
 @pytest.mark.parametrize(
     "to_commit_offsets,expected_offset",
     [
-        pytest.param({100, 101, 102}, 103, id="cache_filled_commits_offsets"),
+        pytest.param({100, 101, 102}, 102, id="cache_filled_commits_offsets"),
         pytest.param(set(), None, id="cache_empty_no_commit"),
     ],
 )

@@ -50,7 +50,7 @@ def test_partition_info_round_trip() -> None:
         ),
         pytest.param(
             [{"partition": 0, "to_commit": {100, 101, 102}, "to_process": set()}],
-            [(0, 103)],
+            [(0, 102)],
             {0: set()},
             id="no_pending_to_process_commit_all_and_cleanup",
         ),
@@ -62,7 +62,7 @@ def test_partition_info_round_trip() -> None:
         ),
         pytest.param(
             [{"partition": 0, "to_commit": {50, 60, 100, 101}, "to_process": {70}}],
-            [(0, 61)],
+            [(0, 60)],
             {0: {100, 101}},
             id="some_offsets_lt_min_pending_partial_commit",
         ),
@@ -73,7 +73,7 @@ def test_partition_info_round_trip() -> None:
                 {"partition": 2, "to_commit": {30, 31, 40, 41}, "to_process": {35}},
                 {"partition": 3, "to_commit": {50, 51}, "to_process": {45}},
             ],
-            [(0, 13), (2, 32)],
+            [(0, 12), (2, 31)],
             {0: set(), 1: set(), 2: {40, 41}, 3: {50, 51}},
             id="multiple_partitions_different_states",
         ),
@@ -85,7 +85,7 @@ def test_partition_info_round_trip() -> None:
                     "to_process": {25, 35, 45},
                 }
             ],
-            [(0, 21)],
+            [(0, 20)],
             {0: {30, 40}},
             id="multiple_pending_to_process_use_minimum",
         ),
@@ -158,8 +158,8 @@ def test_offset_cache_schedule_commit_success(
 
     # Verify it's in to_process
     partition_info = PartitionInfo("test-topic", 0)
-    assert 42 in cache._TrackingManager__to_process[partition_info]
-    assert 42 not in cache._TrackingManager__to_commit.get(partition_info, set())
+    assert 43 in cache._TrackingManager__to_process[partition_info]
+    assert 43 not in cache._TrackingManager__to_commit.get(partition_info, set())
 
     # Now schedule it for commit
     result = cache.schedule_commit(mock_message)
@@ -168,8 +168,8 @@ def test_offset_cache_schedule_commit_success(
     assert result is True
 
     # Verify it moved from to_process to to_commit
-    assert 42 not in cache._TrackingManager__to_process[partition_info]
-    assert 42 in cache._TrackingManager__to_commit[partition_info]
+    assert 43 not in cache._TrackingManager__to_process[partition_info]
+    assert 43 in cache._TrackingManager__to_commit[partition_info]
 
     # No warning should be logged
     assert len(caplog.records) == 0
@@ -200,7 +200,7 @@ def test_offset_cache_schedule_commit_without_prior_processing(
 
     # Verify offset was added to to_commit (new behavior)
     partition_info = PartitionInfo("test-topic", 0)
-    assert 42 in cache._TrackingManager__to_commit.get(partition_info, set())
+    assert 43 in cache._TrackingManager__to_commit.get(partition_info, set())
 
     # No warning is logged in the new implementation
     assert len(caplog.records) == 0
@@ -420,7 +420,7 @@ def test_offset_cache_schedule_commit_offset_not_in_partition(
     assert len(caplog.records) == 0
 
     # The offset IS added to to_commit (new behavior)
-    assert 42 in cache._TrackingManager__to_commit.get(partition_info, set())
+    assert 43 in cache._TrackingManager__to_commit.get(partition_info, set())
 
     # Verify original offsets remain in to_process (42 wasn't there to remove)
     assert set(cache._TrackingManager__to_process[partition_info].keys()) == {

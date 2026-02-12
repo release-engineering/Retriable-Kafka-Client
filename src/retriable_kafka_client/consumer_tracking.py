@@ -69,7 +69,8 @@ class TrackingManager:
     of this cache is to hold information about offsets that cannot be committed
     yet and also about offsets that can be committed already.
 
-    It is enough to commit only the offset of the last committable messages,
+    It is enough to commit only the offset of the last committable messages
+    +1 (Kafka tracks the next offset, not the current one),
     the cluster cannot hold more information than the latest offset for each
     partition and consumer group.
 
@@ -117,7 +118,7 @@ class TrackingManager:
                         TopicPartition(
                             topic=partition_info.topic,
                             partition=partition_info.partition,
-                            offset=max_to_commit + 1,
+                            offset=max_to_commit,
                         )
                     )
                     self.__to_commit[partition_info] = set()
@@ -137,7 +138,7 @@ class TrackingManager:
                     TopicPartition(
                         topic=partition_info.topic,
                         partition=partition_info.partition,
-                        offset=max_to_commit + 1,
+                        offset=max_to_commit,
                     )
                 )
                 # Clean up committed
@@ -145,6 +146,20 @@ class TrackingManager:
                     self.__to_commit[partition_info].remove(committed)
         self._cleanup()
         return to_commit
+
+    def reschedule_uncommittable(
+        self, failed_committable: list[TopicPartition]
+    ) -> None:
+        """
+        Add back data that could not be committed at the moment.
+        The committing of this data will be retried later.
+        Args:
+            failed_committable: list of data that failed to be committed
+        """
+        for failed in failed_committable:
+            self.__to_commit.setdefault(
+                _PartitionInfo(topic=failed.topic, partition=failed.partition), set()
+            ).add(failed.offset)
 
     def process_message(self, message: Message, future: Future[Any]) -> None:
         """
@@ -159,9 +174,9 @@ class TrackingManager:
         message_offset: int = message.offset()  # type: ignore[assignment]
         with self.__access_lock:
             # Mark the message as being processed
-            self.__to_process[_PartitionInfo.from_message(message)][message_offset] = (
-                future
-            )
+            self.__to_process[_PartitionInfo.from_message(message)][
+                message_offset + 1
+            ] = future
 
     def schedule_commit(self, message: Message) -> bool:
         """
@@ -175,9 +190,10 @@ class TrackingManager:
         self.__semaphore.release()
         partition_info = _PartitionInfo.from_message(message)
         message_offset: int = message.offset()  # type: ignore[assignment]
+        stored_offset = message_offset + 1
         with self.__access_lock:
-            self.__to_process[partition_info].pop(message_offset, None)
-            self.__to_commit.setdefault(partition_info, set()).add(message_offset)
+            self.__to_process[partition_info].pop(stored_offset, None)
+            self.__to_commit.setdefault(partition_info, set()).add(stored_offset)
         self._cleanup()
         return True
 
