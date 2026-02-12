@@ -153,6 +153,23 @@ class BaseConsumer:
         finally:
             self.__tracking_manager.schedule_commit(message)
 
+    def __graceful_shutdown(self) -> None:
+        """
+        Finish future execution, perform commits and
+        stop the Kafka consumer. This must be called from
+        the same thread that polls messages.
+        """
+        self.__tracking_manager.register_revoke()
+        try:
+            self.__perform_commits()
+        finally:
+            LOGGER.debug("Shutting down Kafka consumer...")
+            try:
+                self._consumer.close()
+            except (RuntimeError, KafkaException):
+                LOGGER.debug("Consumer already closed.")
+        LOGGER.info("Kafka consumer has been shut down gracefully.")
+
     ### Retry methods ###
 
     def __process_retried_messages_from_schedule(self) -> None:
@@ -245,8 +262,9 @@ class BaseConsumer:
                 self.__perform_commits()
             except BrokenProcessPool:
                 LOGGER.exception("Process pool got broken, stopping consumer.")
-                self.stop()
+                self.__graceful_shutdown()
                 sys.exit(1)
+        self.__graceful_shutdown()
 
     def connection_healthcheck(self) -> bool:
         """Programmatically check if we are able to read from Kafka."""
@@ -263,10 +281,3 @@ class BaseConsumer:
         """
         LOGGER.debug("Stopping retriable consumer...")
         self.__stop_flag = True
-        self.__tracking_manager.register_revoke()
-        self.__perform_commits()
-        try:
-            LOGGER.debug("Shutting down Kafka consumer...")
-            self._consumer.close()
-        except (RuntimeError, KafkaException):  # pragma: no cover
-            LOGGER.debug("Consumer already closed.")

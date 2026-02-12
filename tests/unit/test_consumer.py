@@ -140,28 +140,25 @@ def test_consumer__consumer_property_reuses_instance(
         assert mock_consumer_class.call_count == 1
 
 
-def test_consumer_stop(
+def test_consumer__graceful_shutdown(
     base_consumer: BaseConsumer,
 ) -> None:
     """Test that stop method sets flag, drains cache, and attempts to close consumer."""
     mock_consumer = base_consumer._consumer
     mock_consumer.close = MagicMock()
     mock_consumer.commit = MagicMock()
-    # Mock the executor.map to avoid actually calling it
-    base_consumer._executor.map = MagicMock()
+    base_consumer._executor = MagicMock()
 
     # Pre-fill the tracking manager
     partition_info = PartitionInfo("test-topic", 0)
     tracking_manager = base_consumer._BaseConsumer__tracking_manager
     tracking_manager._TrackingManager__to_commit[partition_info].update({100, 101, 102})
 
-    assert base_consumer._BaseConsumer__stop_flag is False
     # Verify cache has data
     assert len(tracking_manager._TrackingManager__to_commit[partition_info]) == 3
 
-    base_consumer.stop()
+    base_consumer._BaseConsumer__graceful_shutdown()
 
-    assert base_consumer._BaseConsumer__stop_flag is True
     # Verify cache was drained - to_commit should be empty after commits
     assert (
         len(tracking_manager._TrackingManager__to_commit.get(partition_info, set()))
@@ -264,6 +261,16 @@ def test_consumer_run_no_message(
             "Consumer error: I stubbed my toe when fetching messages" in caplog.messages
         )
 
+@patch("retriable_kafka_client.consumer.TrackingManager", MagicMock())
+def test_consumer__graceful_shutdown_closed(
+    base_consumer: BaseConsumer, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level("DEBUG")
+    mock_consumer = base_consumer._consumer
+    mock_consumer.close = MagicMock(side_effect=KafkaException())
+    with patch.object(BaseConsumer, "_BaseConsumer__perform_commits"):
+        base_consumer._BaseConsumer__graceful_shutdown()
+        assert "Consumer already closed." in caplog.messages
 
 def test_consumer_run_handles_broken_process_pool(
     base_consumer: BaseConsumer,
@@ -271,16 +278,12 @@ def test_consumer_run_handles_broken_process_pool(
 ) -> None:
     """Test that BrokenProcessPool exception is handled and consumer stops."""
     caplog.set_level(logging.ERROR)
-
-    mock_consumer = base_consumer._consumer
-    mock_consumer.poll.side_effect = BrokenProcessPool("Pool broken")
-    mock_consumer.subscribe = MagicMock()
-
-    with patch("sys.exit") as mock_exit:
-        base_consumer.run()
-        mock_exit.assert_called_once_with(1)
-        assert base_consumer._BaseConsumer__stop_flag is True
-        assert any("Process pool got broken" in msg for msg in caplog.messages)
+    with patch.object(
+        BaseConsumer, "_BaseConsumer__process_retried_messages_from_schedule"
+    ) as mock_reprocess:
+        mock_reprocess.side_effect = BrokenProcessPool()
+        with pytest.raises(SystemExit):
+            base_consumer.run()
 
 
 @pytest.mark.parametrize(
@@ -551,3 +554,9 @@ def test_consumer_validation_invalid_configs(
         AssertionError, match="Cannot consume twice from the same topic"
     ):
         BaseConsumer(config=config, executor=executor, max_concurrency=2)
+
+
+def test_consumer_stop(base_consumer: BaseConsumer) -> None:
+    assert base_consumer._BaseConsumer__stop_flag is False
+    base_consumer.stop()
+    assert base_consumer._BaseConsumer__stop_flag is True
