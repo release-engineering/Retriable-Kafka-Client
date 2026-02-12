@@ -119,7 +119,15 @@ class BaseConsumer:
         """
         committable = self.__tracking_manager.pop_committable()
         if committable:
-            self._consumer.commit(offsets=committable, asynchronous=False)
+            try:
+                self._consumer.commit(offsets=committable, asynchronous=False)
+            except KafkaException:
+                LOGGER.exception(
+                    "Temporarily failed to commit messages to partitions %s. "
+                    "This action will be retried.",
+                    committable,
+                )
+                self.__tracking_manager.reschedule_uncommittable(committable)
 
     def __on_revoke(self, _: Consumer, partitions: list[TopicPartition]) -> None:
         """

@@ -1,7 +1,6 @@
 """Integration tests for Kafka consumer rebalancing during message processing"""
 
 import asyncio
-import logging
 from typing import Any
 
 import pytest
@@ -16,13 +15,11 @@ from .integration_utils import IntegrationTestScaffold, ScaffoldConfig
 async def test_rebalance_mid_processing_exactly_once(
     kafka_config: dict[str, Any],
     admin_client: AdminClient,
-    caplog: pytest.LogCaptureFixture,
 ) -> None:
     """
     Test that when a rebalance occurs mid-processing (by adding a new consumer),
     all messages are processed at least once with no message loss.
     """
-    caplog.set_level(logging.WARNING)
     total_messages = 50
 
     config = ScaffoldConfig(
