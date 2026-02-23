@@ -261,6 +261,7 @@ def test_consumer_run_no_message(
             "Consumer error: I stubbed my toe when fetching messages" in caplog.messages
         )
 
+
 @patch("retriable_kafka_client.consumer.TrackingManager", MagicMock())
 def test_consumer__graceful_shutdown_closed(
     base_consumer: BaseConsumer, caplog: pytest.LogCaptureFixture
@@ -271,6 +272,7 @@ def test_consumer__graceful_shutdown_closed(
     with patch.object(BaseConsumer, "_BaseConsumer__perform_commits"):
         base_consumer._BaseConsumer__graceful_shutdown()
         assert "Consumer already closed." in caplog.messages
+
 
 def test_consumer_run_handles_broken_process_pool(
     base_consumer: BaseConsumer,
