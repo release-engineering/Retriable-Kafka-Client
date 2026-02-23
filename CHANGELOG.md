@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.2](https://github.com/release-engineering/Retriable-Kafka-Client/compare/v0.2.1...v0.2.2) (2026-02-23)
+
+
+### Bug Fixes
+
+* eliminate logging error messages for JSON-based formatters ([#10](https://github.com/release-engineering/Retriable-Kafka-Client/issues/10)) ([55de04d](https://github.com/release-engineering/Retriable-Kafka-Client/commit/55de04d036844aba80746046d90c0ad083eb5e3e))
+
 ## [0.2.1](https://github.com/release-engineering/Retriable-Kafka-Client/compare/v0.2.0...v0.2.1) (2026-02-16)
 
 
