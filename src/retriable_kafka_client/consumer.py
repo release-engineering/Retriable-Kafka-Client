@@ -190,7 +190,7 @@ class BaseConsumer:
             LOGGER.debug(
                 "Retrying processing message from topic: %s",
                 message.topic(),
-                extra={"raw_message": message.value()},
+                extra={"message_raw": str(message.value())},
             )
             self._process_message(message)
         # Resume consumption from the topic, the latest message's schedule

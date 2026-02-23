@@ -123,7 +123,7 @@ class RetryScheduleCache:
             LOGGER.debug(
                 "Message from topic %s was not configured to wait in a schedule",
                 message.topic(),
-                extra={"message_raw": message.value()},
+                extra={"message_raw": str(message.value())},
             )
             return False
         if _get_current_timestamp() > retry_timestamp:
@@ -133,7 +133,7 @@ class RetryScheduleCache:
             "Message from topic %s scheduled for processing at timestamp %s",
             message.topic(),
             retry_timestamp,
-            extra={"message_raw": message.value()},
+            extra={"message_raw": str(message.value())},
         )
         self.__schedule.setdefault(retry_timestamp, []).append(message)
         return True
@@ -298,7 +298,7 @@ class RetryManager:
                     "Message will not be retried.",
                     message_topic,
                     relevant_config.retries,
-                    extra={"message_raw": message.value()},
+                    extra={"message_raw": str(message.value())},
                 )
                 return
 
@@ -309,12 +309,12 @@ class RetryManager:
             LOGGER.debug(
                 "Message from topic sent for reprocessing, %s",
                 message_topic,
-                extra={"message_raw": message.value()},
+                extra={"message_raw": str(message.value())},
             )
         except (TypeError, BufferError, KafkaException):
             LOGGER.exception(
                 "Cannot resend message from topic: %s to its retry topic %s",
                 message_topic,
                 relevant_producer.topics,
-                extra={"message_raw": message.value()},
+                extra={"message_raw": str(message.value())},
             )
