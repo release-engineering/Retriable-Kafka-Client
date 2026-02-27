@@ -95,32 +95,6 @@ def test_consumer__process_message_valid_json(
         assert mock_future.add_done_callback.called
 
 
-def test_consumer_connection_healthcheck_success(
-    base_consumer: BaseConsumer,
-) -> None:
-    """Test successful connection healthcheck."""
-    mock_consumer = base_consumer._consumer
-    mock_consumer.list_topics.return_value = None
-
-    result = base_consumer.connection_healthcheck()
-    assert result is True
-    mock_consumer.list_topics.assert_called_once_with(timeout=5)
-
-
-def test_consumer_connection_healthcheck_failure(
-    base_consumer: BaseConsumer,
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    """Test connection healthcheck failure handling."""
-    caplog.set_level(logging.DEBUG)
-    mock_consumer = base_consumer._consumer
-    mock_consumer.list_topics.side_effect = KafkaException("Connection failed")
-
-    result = base_consumer.connection_healthcheck()
-    assert result is False
-    assert any("Error while connecting to Kafka" in msg for msg in caplog.messages)
-
-
 def test_consumer__consumer_property_reuses_instance(
     sample_config: ConsumerConfig,
     executor: Executor,

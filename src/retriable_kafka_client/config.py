@@ -5,7 +5,7 @@ from typing import Callable, Any
 
 
 @dataclass(kw_only=True)
-class _CommonConfig:
+class CommonConfig:
     """
     Topic configuration common for consumers and producers.
     Attributes:
@@ -22,7 +22,7 @@ class _CommonConfig:
 
 
 @dataclass
-class ProducerConfig(_CommonConfig):
+class ProducerConfig(CommonConfig):
     """
     Topic configuration common each producer, including backoff settings.
     Attributes:
@@ -63,7 +63,7 @@ class ConsumeTopicConfig:
 
 
 @dataclass
-class ConsumerConfig(_CommonConfig):
+class ConsumerConfig(CommonConfig):
     """
     Topic configuration for each consumer.
     Attributes:
