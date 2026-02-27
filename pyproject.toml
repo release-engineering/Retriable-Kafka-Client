@@ -1,6 +1,6 @@
 [project]
 name = "retriable-kafka-client"
-version = "0.2.2"
+version = "0.3.0"
 description = "Kafka client library based on confluent-kafka with retry functionality"
 authors = [
     {name = "Marek Szymutko", email = "mszymutk@redhat.com"},
