@@ -9,6 +9,7 @@ from typing import Any
 
 from confluent_kafka import Consumer, Message, KafkaException, TopicPartition
 
+from .health import perform_healthcheck_using_client
 from .kafka_utils import message_to_partition
 from .kafka_settings import KafkaOptions, DEFAULT_CONSUMER_SETTINGS
 from .consumer_tracking import TrackingManager
@@ -276,12 +277,7 @@ class BaseConsumer:
 
     def connection_healthcheck(self) -> bool:
         """Programmatically check if we are able to read from Kafka."""
-        try:
-            self._consumer.list_topics(timeout=5)
-            return True
-        except KafkaException as e:
-            LOGGER.debug("Error while connecting to Kafka %s", e)
-            return False
+        return perform_healthcheck_using_client(self._consumer)
 
     def stop(self) -> None:
         """

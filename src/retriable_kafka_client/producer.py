@@ -8,6 +8,7 @@ from typing import Any
 
 from confluent_kafka import Producer, KafkaException
 
+from .health import perform_healthcheck_using_client
 from .kafka_settings import KafkaOptions, DEFAULT_PRODUCER_SETTINGS
 from .config import ProducerConfig
 
@@ -158,6 +159,10 @@ class BaseProducer:
                     problems[topic] = err
         self._producer.flush()
         self.__handle_problems(problems)
+
+    def connection_healthcheck(self) -> bool:
+        """Programmatically check if we are able to read from Kafka."""
+        return perform_healthcheck_using_client(self._producer)
 
     def close(self) -> None:
         """
