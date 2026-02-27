@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.0](https://github.com/release-engineering/Retriable-Kafka-Client/compare/v0.2.2...v0.3.0) (2026-02-27)
+
+
+### Features
+
+* add a separate healthcheck client ([b3b230c](https://github.com/release-engineering/Retriable-Kafka-Client/commit/b3b230c9127cb802abeb43e1ac1b96ab6bdfe0d6))
+
 ## [0.2.2](https://github.com/release-engineering/Retriable-Kafka-Client/compare/v0.2.1...v0.2.2) (2026-02-23)
 
 
