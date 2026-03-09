@@ -35,3 +35,11 @@ jobs:
       run: |
         uv run tox
 
+  commitlint:
+    name: Conventional Commit Lint
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - uses: webiny/action-conventional-commits@v1.3.0

@@ -41,8 +41,6 @@ services:
     volumes:
       - ./kafka_config/kafka-startup.sh:/tmp/kafka-startup.sh:ro,z
       - ./kafka_config/kafka_server_jaas.conf:/etc/kafka/kafka_server_jaas.conf:ro,z
-    tmpfs:
-      - /tmp/kraft-combined-logs:uid=1000,gid=1000
     command: ["/bin/bash", "/tmp/kafka-startup.sh"]
     healthcheck:
       test: ["CMD", "/opt/kafka/bin/kafka-broker-api-versions.sh", "--bootstrap-server", "localhost:9093"]
