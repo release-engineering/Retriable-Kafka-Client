@@ -19,9 +19,12 @@ from .integration_utils import (
 
 @pytest.mark.asyncio
 async def test_producer_consumer_integration(
-    kafka_config: dict[str, Any], admin_client: AdminClient
+    kafka_config: dict[str, Any],
+    admin_client: AdminClient,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     """Test producing messages to 2 topics and consuming them"""
+    caplog.set_level("DEBUG")
 
     message_count = 3
 
@@ -51,3 +54,29 @@ async def test_producer_consumer_integration(
                 f"Message {msg_id} should appear {len(config.topics)} times, "
                 f"got {scaffold.tracker.success_counts.get(msg_id)}"
             )
+
+        # Verify all 'left to process' messages were logged
+        assert (
+            "2 message(s) left to process in test-topic-1 (partition 0)"
+            in caplog.messages
+        )
+        assert (
+            "1 message(s) left to process in test-topic-1 (partition 0)"
+            in caplog.messages
+        )
+        assert (
+            "0 message(s) left to process in test-topic-1 (partition 0)"
+            in caplog.messages
+        )
+        assert (
+            "2 message(s) left to process in test-topic-2 (partition 0)"
+            in caplog.messages
+        )
+        assert (
+            "1 message(s) left to process in test-topic-2 (partition 0)"
+            in caplog.messages
+        )
+        assert (
+            "0 message(s) left to process in test-topic-2 (partition 0)"
+            in caplog.messages
+        )

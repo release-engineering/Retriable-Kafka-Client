@@ -244,7 +244,8 @@ class BaseConsumer:
             if topic.retry_topic is not None
         ]
         self._consumer.subscribe(
-            [*plain_topics, *retry_topics], on_revoke=self.__on_revoke
+            [*plain_topics, *retry_topics],
+            on_revoke=self.__on_revoke,
         )
         while not self.__stop_flag:
             try:
@@ -262,13 +263,29 @@ class BaseConsumer:
                 if error := msg.error():
                     LOGGER.debug("Consumer error: %s", error.str())
                     continue
-                LOGGER.debug("Consumer received message at offset: %s", msg.offset())
+
+                current_offset = msg.offset()
+                partition = message_to_partition(msg)
+                LOGGER.debug("Consumer received message at offset: %s", current_offset)
                 if self.__schedule_cache.add_if_applicable(msg):
                     # Skip messages not eligible for execution yet, schedule them
-                    self._consumer.pause([message_to_partition(msg)])
+                    self._consumer.pause([partition])
                     continue
                 self._process_message(msg)
                 self.__perform_commits()
+
+                # Calculate and log remaining messages for partition
+                _, high_offset = self._consumer.get_watermark_offsets(
+                    partition, cached=True
+                )
+                if current_offset is not None:
+                    messages_left = high_offset - current_offset - 1
+                    LOGGER.info(
+                        "%d message(s) left to process in %s (partition %d)",
+                        messages_left,
+                        msg.topic(),
+                        msg.partition(),
+                    )
             except BrokenProcessPool:
                 LOGGER.exception("Process pool got broken, stopping consumer.")
                 self.__graceful_shutdown()
