@@ -152,12 +152,15 @@ def test_consumer__graceful_shutdown(
 def test_consumer_run(
     base_consumer: BaseConsumer,
     schedule_message: bool,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     """Test run method with various poll behaviors."""
+    caplog.set_level(logging.INFO)
     mock_consumer = base_consumer._consumer
     mock_consumer.subscribe = MagicMock()
     mock_consumer.pause = MagicMock()
     mock_consumer.resume = MagicMock()
+    mock_consumer.get_watermark_offsets = MagicMock()
 
     mock_message = MagicMock(spec=Message)
     mock_message.topic.return_value = "test-topic"
@@ -177,6 +180,8 @@ def test_consumer_run(
     mock_schedule_cache.pop_reprocessable.return_value = []
     base_consumer._BaseConsumer__schedule_cache = mock_schedule_cache
 
+    mock_consumer.get_watermark_offsets.return_value = (0, 10)
+
     with patch.object(base_consumer, "_process_message") as mock_process:
         base_consumer.run()
         if schedule_message:
@@ -185,6 +190,11 @@ def test_consumer_run(
             mock_process.assert_not_called()
         else:
             mock_process.assert_called_once_with(mock_message)
+            mock_consumer.get_watermark_offsets.assert_called_once()
+            assert (
+                "9 message(s) left to process in test-topic (partition 0)"
+                in caplog.messages
+            )
 
     # subscribe is now called with on_revoke callback
     assert mock_consumer.subscribe.call_count == 1
