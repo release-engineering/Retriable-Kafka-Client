@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.4.0](https://github.com/release-engineering/Retriable-Kafka-Client/compare/v0.3.0...v0.4.0) (2026-03-12)
+
+
+### Features
+
+* **ISV-6783:** logging remaining messages for partitions ([1b87f2a](https://github.com/release-engineering/Retriable-Kafka-Client/commit/1b87f2a1676dc6bd6b9e9e624f09065d169e37f5))
+* **ISV-6783:** logging remaining messages for partitions ([57199be](https://github.com/release-engineering/Retriable-Kafka-Client/commit/57199be48b2de17c446ea663cbd9642474dd08e6))
+
 ## [0.3.0](https://github.com/release-engineering/Retriable-Kafka-Client/compare/v0.2.2...v0.3.0) (2026-02-27)
 
 
