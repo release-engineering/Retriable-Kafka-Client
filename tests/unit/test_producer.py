@@ -58,15 +58,14 @@ def test_producer_send_success_first_attempt(
         _run_send_method(base_producer, send_method, message)
 
     mock_kafka_producer: MagicMock = base_producer._producer
-    # Should produce to all topics once
     assert mock_kafka_producer.produce.call_count == len(base_producer._config.topics)
-    for topic in base_producer._config.topics:
-        mock_kafka_producer.produce.assert_any_call(
-            topic=topic,
-            value=json.dumps(message).encode("utf-8"),
-            timestamp=1000,
-            headers=None,
-        )
+    for call in mock_kafka_producer.produce.call_args_list:
+        kwargs = call[1]
+        assert kwargs["topic"] in base_producer._config.topics
+        assert kwargs["value"] == json.dumps(message).encode("utf-8")
+        assert kwargs["timestamp"] == 1000
+        assert kwargs["key"] is not None
+        assert isinstance(kwargs["headers"], dict)
 
 
 @pytest.mark.parametrize("send_method", ["send", "send_sync"])
@@ -174,18 +173,28 @@ def test_producer_close(base_producer: BaseProducer) -> None:
 @pytest.mark.parametrize(
     "input_message,expected_output",
     [
-        pytest.param(b"raw bytes", b"raw bytes", id="bytes_passthrough"),
-        pytest.param({"key": "value"}, b'{"key": "value"}', id="dict_to_json"),
+        pytest.param(b"raw bytes", [b"raw bytes"], id="bytes_passthrough"),
+        pytest.param({"key": "value"}, [b'{"key": "value"}'], id="dict_to_json"),
         pytest.param(
             {"num": 42, "flag": True},
-            b'{"num": 42, "flag": true}',
+            [b'{"num": 42, "flag": true}'],
             id="dict_with_types",
         ),
-        pytest.param([], b"[]", id="empty_list"),
+        pytest.param([], [], id="empty_chunk_list"),
     ],
 )
-def test_serialize_message(input_message, expected_output) -> None:
-    """Test that messages are correctly serialized to bytes."""
-    # Access the private static method via name mangling
-    result = BaseProducer._BaseProducer__serialize_message(input_message)
+def test_serialize_message(
+    base_producer: BaseProducer, input_message, expected_output
+) -> None:
+    """Test that messages are correctly serialized to byte chunks."""
+    result = base_producer._BaseProducer__serialize_message(input_message, None)
     assert result == expected_output
+
+
+def test_serialize_message_resize_chunks(base_producer: BaseProducer) -> None:
+    """Test that messages are correctly serialized to byte chunks."""
+    with patch.object(base_producer, "_get_chunk_size", return_value=5):
+        result = base_producer._BaseProducer__serialize_message(
+            [b"AAAAAA", b"AA"], None
+        )
+    assert result == [b"AAAAA", b"AAA"]

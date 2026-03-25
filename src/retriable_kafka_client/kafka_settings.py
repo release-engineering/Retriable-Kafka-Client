@@ -1,5 +1,12 @@
 """Settings definitions for Kafka. Introduces intended defaults."""
 
+DEFAULT_MESSAGE_SIZE = 1000000
+MESSAGE_OVERHEAD = 400  # When splitting messages,
+# the exact length cannot be easily computed.
+# Therefore, we check the size of passed objects
+# and subtract additional 400 B out of default 1 MB
+# This number also includes custom headers for
+
 
 class KafkaOptions:
     """
@@ -16,6 +23,7 @@ class KafkaOptions:
     USERNAME = "sasl.username"
     PASSWORD = "sasl.password"
     PARTITION_ASSIGNMENT_STRAT = "partition.assignment.strategy"
+    MAX_MESSAGE_SIZE = "message.max.bytes"
 
 
 _DEFAULT_COMMON_SETTINGS = {
@@ -30,4 +38,7 @@ DEFAULT_CONSUMER_SETTINGS = {
     **_DEFAULT_COMMON_SETTINGS,
 }
 
-DEFAULT_PRODUCER_SETTINGS = {**_DEFAULT_COMMON_SETTINGS}
+DEFAULT_PRODUCER_SETTINGS = {
+    KafkaOptions.MAX_MESSAGE_SIZE: DEFAULT_MESSAGE_SIZE,
+    **_DEFAULT_COMMON_SETTINGS,
+}

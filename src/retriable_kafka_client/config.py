@@ -40,6 +40,7 @@ class ProducerConfig(CommonConfig):
     retries: int = field(default=3)
     fallback_factor: float = field(default=2.0)
     fallback_base: float = field(default=5.0)
+    max_message_size: int = field(default=1000000)
 
 
 @dataclass
