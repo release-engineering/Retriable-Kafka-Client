@@ -10,6 +10,12 @@ from confluent_kafka import KafkaException
 
 from retriable_kafka_client.producer import BaseProducer
 from retriable_kafka_client.config import ProducerConfig
+from retriable_kafka_client.headers import (
+    CHUNK_GROUP_HEADER,
+    NUMBER_OF_CHUNKS_HEADER,
+    CHUNK_ID_HEADER,
+    serialize_number_to_bytes,
+)
 
 
 @pytest.fixture
@@ -58,15 +64,14 @@ def test_producer_send_success_first_attempt(
         _run_send_method(base_producer, send_method, message)
 
     mock_kafka_producer: MagicMock = base_producer._producer
-    # Should produce to all topics once
     assert mock_kafka_producer.produce.call_count == len(base_producer._config.topics)
-    for topic in base_producer._config.topics:
-        mock_kafka_producer.produce.assert_any_call(
-            topic=topic,
-            value=json.dumps(message).encode("utf-8"),
-            timestamp=1000,
-            headers=None,
-        )
+    for call in mock_kafka_producer.produce.call_args_list:
+        kwargs = call[1]
+        assert kwargs["topic"] in base_producer._config.topics
+        assert kwargs["value"] == json.dumps(message).encode("utf-8")
+        assert kwargs["timestamp"] == 1000
+        assert kwargs["key"] is not None
+        assert isinstance(kwargs["headers"], dict)
 
 
 @pytest.mark.parametrize("send_method", ["send", "send_sync"])
@@ -174,18 +179,89 @@ def test_producer_close(base_producer: BaseProducer) -> None:
 @pytest.mark.parametrize(
     "input_message,expected_output",
     [
-        pytest.param(b"raw bytes", b"raw bytes", id="bytes_passthrough"),
-        pytest.param({"key": "value"}, b'{"key": "value"}', id="dict_to_json"),
+        pytest.param(b"raw bytes", [b"raw bytes"], id="bytes_passthrough"),
+        pytest.param({"key": "value"}, [b'{"key": "value"}'], id="dict_to_json"),
         pytest.param(
             {"num": 42, "flag": True},
-            b'{"num": 42, "flag": true}',
+            [b'{"num": 42, "flag": true}'],
             id="dict_with_types",
         ),
-        pytest.param([], b"[]", id="empty_list"),
+        pytest.param([], [], id="empty_chunk_list"),
     ],
 )
-def test_serialize_message(input_message, expected_output) -> None:
-    """Test that messages are correctly serialized to bytes."""
-    # Access the private static method via name mangling
-    result = BaseProducer._BaseProducer__serialize_message(input_message)
+def test_serialize_message(
+    base_producer: BaseProducer, input_message, expected_output
+) -> None:
+    """Test that messages are correctly serialized to byte chunks."""
+    result = base_producer._BaseProducer__serialize_message(input_message, None, True)
+    assert result == expected_output
+
+
+@pytest.mark.parametrize("send_method", ["send", "send_sync"])
+@pytest.mark.parametrize("split_messages", [True, False])
+def test_producer_send_chunking_headers(send_method: str, split_messages: bool) -> None:
+    """Test that chunking headers are added only when split_messages is enabled."""
+    config = ProducerConfig(
+        kafka_hosts=["example.com:9092"],
+        topics=["test_topic"],
+        username="test_user",
+        password="test_pass",
+        retries=2,
+        fallback_factor=1.1,
+        fallback_base=0.01,
+        additional_settings={},
+        split_messages=split_messages,
+    )
+    with patch("retriable_kafka_client.producer.Producer"):
+        producer = BaseProducer(config=config)
+        _ = producer._producer
+
+    message = {"key": "value"}
+
+    with patch("time.time", return_value=1):
+        _run_send_method(producer, send_method, message)
+
+    mock_kafka_producer: MagicMock = producer._producer
+    assert mock_kafka_producer.produce.call_count == 1
+    call_kwargs = mock_kafka_producer.produce.call_args[1]
+    headers = call_kwargs["headers"]
+
+    chunking_headers = {CHUNK_GROUP_HEADER, NUMBER_OF_CHUNKS_HEADER, CHUNK_ID_HEADER}
+
+    if split_messages:
+        for header in chunking_headers:
+            assert header in headers, (
+                f"Expected header {header!r} when split_messages=True"
+            )
+        assert isinstance(headers[CHUNK_GROUP_HEADER], bytes)
+        assert len(headers[CHUNK_GROUP_HEADER]) == 16  # UUID bytes
+        assert headers[NUMBER_OF_CHUNKS_HEADER] == serialize_number_to_bytes(1)
+        assert headers[CHUNK_ID_HEADER] == serialize_number_to_bytes(0)
+    else:
+        for header in chunking_headers:
+            assert header not in headers, (
+                f"Unexpected header {header!r} when split_messages=False"
+            )
+
+
+@pytest.mark.parametrize(
+    ["chunking_size", "input_message", "expected_output"],
+    [
+        (5, [b"AAAAAA", b"AA"], [b"AAAAA", b"AAA"]),
+        (0, [b"AAAAAA", b"AA"], [b"AAAAAAAA"]),
+    ],
+)
+def test_serialize_message_resize_chunks(
+    chunking_size: int,
+    input_message: list[bytes] | bytes | dict[str, Any],
+    expected_output: list[bytes],
+    base_producer: BaseProducer,
+) -> None:
+    """Test that messages are correctly serialized to byte chunks."""
+    with patch.object(base_producer, "_get_chunk_size", return_value=chunking_size):
+        result = base_producer._BaseProducer__serialize_message(
+            input_message,
+            None,
+            chunking_size != 0,
+        )
     assert result == expected_output

@@ -42,6 +42,7 @@ class ProducerConfig(CommonConfig):
     retries: int = field(default=3)
     fallback_factor: float = field(default=2.0)
     fallback_base: float = field(default=5.0)
+    split_messages: bool = field(default=False)
 
 
 @dataclass

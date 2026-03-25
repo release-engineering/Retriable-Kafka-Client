@@ -5,7 +5,7 @@ import random
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Callable
 
 from confluent_kafka.admin import AdminClient, NewTopic
@@ -44,15 +44,25 @@ class MessageGenerator:
     def __init__(self) -> None:
         self._call_count = 0
 
-    def generate(self, count: int) -> list[dict[str, Any]]:
+    def generate(
+        self, count: int, extra_fields: dict[str, Any] | None = None
+    ) -> list[dict[str, Any]]:
         """
         Generate a chunk of messages.
         Args:
             count: Number of messages to generate in this chunk
+            extra_fields: Extra fields to add to the generated messages
         """
+        extra_fields = extra_fields or {}
         result = []
         for _ in range(count):
-            result.append({"id": self._call_count, "message": "This is a test message"})
+            result.append(
+                {
+                    "id": self._call_count,
+                    "message": "This is a test message",
+                    **extra_fields,
+                }
+            )
             self._call_count += 1
         return result
 
@@ -226,6 +236,8 @@ class ScaffoldConfig:
     topics: list[ConsumeTopicConfig]
     group_id: str
     timeout: float = 15.0
+    split_messages: bool = False
+    additional_settings: dict[str, Any] = field(default_factory=dict)
 
 
 class IntegrationTestScaffold:
@@ -301,7 +313,11 @@ class IntegrationTestScaffold:
             username=self.kafka_config[KafkaOptions.USERNAME],
             password=self.kafka_config[KafkaOptions.PASSWORD],
             fallback_base=0.1,
-            additional_settings={KafkaOptions.SECURITY_PROTO: "SASL_PLAINTEXT"},
+            split_messages=self.config.split_messages,
+            additional_settings={
+                KafkaOptions.SECURITY_PROTO: "SASL_PLAINTEXT",
+                **self.config.additional_settings,
+            },
         )
         return BaseProducer(producer_config)
 
@@ -349,7 +365,10 @@ class IntegrationTestScaffold:
             group_id=self.config.group_id,
             target=target,
             filter_function=filter_function,
-            additional_settings={KafkaOptions.SECURITY_PROTO: "SASL_PLAINTEXT"},
+            additional_settings={
+                KafkaOptions.SECURITY_PROTO: "SASL_PLAINTEXT",
+                **self.config.additional_settings,
+            },
         )
 
         consumer = BaseConsumer(
@@ -388,12 +407,17 @@ class IntegrationTestScaffold:
                 pass
 
     async def send_messages(
-        self, count: int, headers: dict[str, bytes] | None = None) -> list[dict[str, Any]]:
+        self,
+        count: int,
+        extra_fields: dict[str, Any] | None = None,
+        headers: dict[str, bytes] | None = None,
+    ) -> list[dict[str, Any]]:
         """
         Generate and send messages.
 
         Args:
             count: Number of messages to send.
+            extra_fields: Extra fields to add to each message.
             headers: Message headers (optional parameter)
 
         Returns:
@@ -402,7 +426,7 @@ class IntegrationTestScaffold:
         if self._producer is None:
             raise RuntimeError("Harness not started. Use 'async with' context manager.")
 
-        messages = self.generator.generate(count)
+        messages = self.generator.generate(count, extra_fields=extra_fields)
 
         for msg in messages:
             await self._producer.send(msg, headers=headers)

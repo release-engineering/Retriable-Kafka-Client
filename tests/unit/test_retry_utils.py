@@ -4,9 +4,10 @@ import logging
 from unittest.mock import MagicMock, patch
 
 import pytest
-from confluent_kafka import KafkaException, KafkaError, TopicPartition
+from confluent_kafka import KafkaException, KafkaError, Message, TopicPartition
 
 from retriable_kafka_client.config import ConsumerConfig, ConsumeTopicConfig
+from retriable_kafka_client.kafka_utils import MessageGroup
 from retriable_kafka_client.retry_utils import (
     ATTEMPT_HEADER,
     TIMESTAMP_HEADER,
@@ -39,7 +40,7 @@ def _make_message(
     error: KafkaError | None = None,
 ) -> MagicMock:
     """Helper to create a mock Kafka message."""
-    message = MagicMock()
+    message = MagicMock(spec=Message)
     message.topic.return_value = topic
     message.partition.return_value = partition
     message.offset.return_value = offset
@@ -47,6 +48,26 @@ def _make_message(
     message.headers.return_value = headers
     message.error.return_value = error
     return message
+
+
+def _make_message_group(
+    topic: str = "test-topic",
+    partition: int = 0,
+    offset: int = 0,
+    value: bytes | None = b"test",
+    headers: list[tuple[str, bytes]] | None = None,
+) -> MessageGroup:
+    """Helper to create a MessageGroup wrapping a mock Kafka message.
+    Uses a plain MagicMock (no spec) for the inner message so that
+    it stays truthy, which MessageGroup.headers property relies on."""
+    inner = MagicMock()
+    inner.topic.return_value = topic
+    inner.partition.return_value = partition
+    inner.offset.return_value = offset
+    inner.value.return_value = value
+    inner.headers.return_value = headers
+    inner.error.return_value = None
+    return MessageGroup(topic=topic, partition=partition, messages={0: inner})
 
 
 @pytest.mark.parametrize(
@@ -101,8 +122,8 @@ def test_get_retry_attempt(
     headers: list[tuple[str, bytes]] | None, expected: int
 ) -> None:
     """Test _get_retry_attempt extracts attempt number from headers correctly."""
-    message = _make_message(headers=headers)
-    assert _get_retry_attempt(message) == expected
+    message_group = _make_message_group(headers=headers)
+    assert _get_retry_attempt(message_group) == expected
 
 
 class TestRetryScheduleCache:
@@ -189,11 +210,13 @@ class TestRetryScheduleCache:
         cache = RetryScheduleCache()
         cache._RetryScheduleCache__schedule = {
             100: [],
-            200: _make_message(
-                topic="topic-a",
-                partition=0,
-                headers=[(TIMESTAMP_HEADER, int(200).to_bytes(8, "big"))],
-            ),
+            200: [
+                _make_message(
+                    topic="topic-a",
+                    partition=0,
+                    headers=[(TIMESTAMP_HEADER, int(200).to_bytes(8, "big"))],
+                )
+            ],
         }
 
         cache._cleanup()
@@ -424,7 +447,9 @@ def test__get_retry_headers(
         return_value=timestamp,
     ):
         manager = RetryManager(config)
-        result = manager._get_retry_headers(_make_message(topic="t", headers=headers))
+        result = manager._get_retry_headers(
+            _make_message_group(topic="t", headers=headers)
+        )
     assert int.from_bytes(result[ATTEMPT_HEADER], "big") == expected_attempt
     assert int.from_bytes(result[TIMESTAMP_HEADER], "big") == expected_ts
 
@@ -437,7 +462,7 @@ def test__get_retry_headers_no_config() -> None:
         ]
     )
     manager = RetryManager(config)
-    result = manager._get_retry_headers(_make_message(topic="t", headers=[]))
+    result = manager._get_retry_headers(_make_message_group(topic="t", headers=[]))
     assert result is None
 
 
@@ -480,21 +505,21 @@ def test_resend_message(topics, message_topic, send_error, expect_send) -> None:
     with patch("retriable_kafka_client.retry_utils.BaseProducer") as mock_cls:
         mock_cls.return_value.send_sync.side_effect = send_error
         manager = RetryManager(config)
-        manager.resend_message(_make_message(topic=message_topic))
+        manager.resend_message(_make_message_group(topic=message_topic))
         assert mock_cls.return_value.send_sync.called == expect_send
 
 
 def test_resend_message_no_value() -> None:
-    message = _make_message(value=None)
+    message_group = _make_message_group(value=None)
     config = _make_config([])
     with patch("retriable_kafka_client.retry_utils.BaseProducer") as mock_cls:
         manager = RetryManager(config)
-        manager.resend_message(message)
+        manager.resend_message(message_group)
         mock_cls.return_value.send_sync.assert_not_called()
 
 
 def test_resend_message_exhausted_attempts(caplog: pytest.LogCaptureFixture) -> None:
-    message = _make_message(
+    message_group = _make_message_group(
         topic="t-retry",
         value=b'{"foo": "bar"}',
         headers=[
@@ -508,7 +533,6 @@ def test_resend_message_exhausted_attempts(caplog: pytest.LogCaptureFixture) -> 
     )
     with patch("retriable_kafka_client.retry_utils.BaseProducer") as mock_cls:
         manager = RetryManager(config)
-        manager.resend_message(message)
+        manager.resend_message(message_group)
         mock_cls.return_value.send_sync.assert_not_called()
-        print(caplog.messages)
         assert "Message will not be retried." in caplog.messages[-1]

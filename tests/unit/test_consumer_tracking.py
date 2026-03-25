@@ -8,35 +8,8 @@ from confluent_kafka import Message, TopicPartition
 
 from retriable_kafka_client.consumer_tracking import (
     TrackingManager,
-    _PartitionInfo as PartitionInfo,
 )
-
-
-def test_partition_info_round_trip() -> None:
-    """Test that _PartitionInfo can be converted to TopicPartition and maintains data integrity."""
-    # Create a mock Kafka message
-    mock_message = MagicMock(
-        spec=Message,
-        topic=lambda: "test-topic",
-        partition=lambda: 3,
-        offset=lambda: 150,
-    )
-
-    # Convert Message to _PartitionInfo
-    partition_info = PartitionInfo.from_message(mock_message)
-
-    # Verify extracted data
-    assert partition_info.topic == "test-topic"
-    assert partition_info.partition == 3
-
-    # Convert back to TopicPartition with the same offset
-    topic_partition = partition_info.to_offset_info(150)
-
-    # Verify data integrity after round-trip
-    assert topic_partition.topic == "test-topic"
-    assert topic_partition.partition == 3
-    assert topic_partition.offset == 150
-    assert isinstance(topic_partition, TopicPartition)
+from retriable_kafka_client.kafka_utils import TrackingInfo, MessageGroup
 
 
 @pytest.mark.parametrize(
@@ -101,12 +74,12 @@ def test_offset_cache_pop_committable(
 
     # Setup the cache state
     for state in partition_states:
-        partition_info = PartitionInfo("test-topic", state["partition"])
-        # Handle special case for explicitly creating empty set in to_commit
-        cache._TrackingManager__to_commit[partition_info] = state["to_commit"]
-        # to_process now stores dict[int, Future], convert sets to dicts with mock futures
+        partition_info = TrackingInfo("test-topic", state["partition"])
+        cache._TrackingManager__to_commit[partition_info] = {
+            (offset,) for offset in state["to_commit"]
+        }
         cache._TrackingManager__to_process[partition_info] = {
-            offset: MagicMock(spec=Future) for offset in state["to_process"]
+            (offset,): MagicMock(spec=Future) for offset in state["to_process"]
         }
 
     # Call pop_committable
@@ -128,10 +101,11 @@ def test_offset_cache_pop_committable(
 
     # Verify remaining state in to_commit
     for partition, expected_offsets in expected_remaining_to_commit.items():
-        partition_info = PartitionInfo("test-topic", partition)
+        partition_info = TrackingInfo("test-topic", partition)
         actual_offsets = cache._TrackingManager__to_commit.get(partition_info, set())
-        assert actual_offsets == expected_offsets, (
-            f"Partition {partition}: expected {expected_offsets}, got {actual_offsets}"
+        expected_as_tuples = {(offset,) for offset in expected_offsets}
+        assert actual_offsets == expected_as_tuples, (
+            f"Partition {partition}: expected {expected_as_tuples}, got {actual_offsets}"
         )
 
 
@@ -141,35 +115,38 @@ def test_offset_cache_schedule_commit_success(
     """Test schedule_commit successfully moves offset from to_process to to_commit."""
     cache = TrackingManager(concurrency=16, cancel_wait_time=30.0)
 
-    # Create a mock message
-    mock_message = MagicMock(
+    # Create a MessageGroup
+    mock_inner_message = MagicMock(
         spec=Message,
         topic=lambda: "test-topic",
         partition=lambda: 0,
         offset=lambda: 42,
         value=lambda: b'{"test": "data"}',
     )
+    message_group = MessageGroup(
+        topic="test-topic", partition=0, messages={0: mock_inner_message}
+    )
 
     # Create a mock future
     mock_future = MagicMock(spec=Future)
 
     # First, mark the message as being processed
-    cache.process_message(mock_message, mock_future)
+    cache.process_message(message_group, mock_future)
 
     # Verify it's in to_process
-    partition_info = PartitionInfo("test-topic", 0)
-    assert 43 in cache._TrackingManager__to_process[partition_info]
-    assert 43 not in cache._TrackingManager__to_commit.get(partition_info, set())
+    partition_info = TrackingInfo("test-topic", 0)
+    assert (43,) in cache._TrackingManager__to_process[partition_info]
+    assert (43,) not in cache._TrackingManager__to_commit.get(partition_info, set())
 
     # Now schedule it for commit
-    result = cache.schedule_commit(mock_message)
+    result = cache.schedule_commit(message_group)
 
     # Verify success
     assert result is True
 
     # Verify it moved from to_process to to_commit
-    assert 43 not in cache._TrackingManager__to_process[partition_info]
-    assert 43 in cache._TrackingManager__to_commit[partition_info]
+    assert (43,) not in cache._TrackingManager__to_process.get(partition_info, {})
+    assert (43,) in cache._TrackingManager__to_commit[partition_info]
 
     # No warning should be logged
     assert len(caplog.records) == 0
@@ -182,25 +159,28 @@ def test_offset_cache_schedule_commit_without_prior_processing(
     caplog.set_level(logging.WARNING)
     cache = TrackingManager(concurrency=16, cancel_wait_time=30.0)
 
-    # Create a mock message
-    mock_message = MagicMock(
+    # Create a MessageGroup
+    mock_inner_message = MagicMock(
         spec=Message,
         topic=lambda: "test-topic",
         partition=lambda: 0,
         offset=lambda: 42,
         value=lambda: b'{"test": "data"}',
     )
+    message_group = MessageGroup(
+        topic="test-topic", partition=0, messages={0: mock_inner_message}
+    )
 
     # Don't add it to to_process (simulating it was never marked for processing)
     # Try to schedule commit
-    result = cache.schedule_commit(mock_message)
+    result = cache.schedule_commit(message_group)
 
     # schedule_commit always returns True in the new implementation
     assert result is True
 
     # Verify offset was added to to_commit (new behavior)
-    partition_info = PartitionInfo("test-topic", 0)
-    assert 43 in cache._TrackingManager__to_commit.get(partition_info, set())
+    partition_info = TrackingInfo("test-topic", 0)
+    assert (43,) in cache._TrackingManager__to_commit.get(partition_info, set())
 
     # No warning is logged in the new implementation
     assert len(caplog.records) == 0
@@ -211,32 +191,32 @@ def test_offset_cache_schedule_commit_without_prior_processing(
     [
         pytest.param(
             {
-                PartitionInfo("topic-a", 0): {
+                TrackingInfo("topic-a", 0): {
                     100: "future_1",
                     101: "future_2",
                     102: "future_3",
                 },
             },
-            {PartitionInfo("topic-a", 0)},
+            {TrackingInfo("topic-a", 0)},
             ["future_1", "future_3"],
             ["future_2"],
             id="mixed_some_cancelled_some_not",
         ),
         pytest.param(
             {
-                PartitionInfo("topic-a", 0): {100: "future_1", 101: "future_2"},
-                PartitionInfo("topic-b", 0): {200: "future_3"},
+                TrackingInfo("topic-a", 0): {100: "future_1", 101: "future_2"},
+                TrackingInfo("topic-b", 0): {200: "future_3"},
             },
-            {PartitionInfo("topic-a", 0)},
+            {TrackingInfo("topic-a", 0)},
             ["future_1", "future_2"],
             [],
             id="partial_revoke_keeps_non_revoked",
         ),
         pytest.param(
             {
-                PartitionInfo("topic-a", 0): {100: "future_1", 101: "future_2"},
+                TrackingInfo("topic-a", 0): {100: "future_1", 101: "future_2"},
             },
-            {PartitionInfo("topic-b", 0)},
+            {TrackingInfo("topic-b", 0)},
             [],
             ["future_1", "future_2"],
             id="different_topic",
@@ -244,8 +224,8 @@ def test_offset_cache_schedule_commit_without_prior_processing(
     ],
 )
 def offset_cache_revoke_processing(
-    to_process_data: dict[PartitionInfo, dict[int, str]],
-    revoked_partitions: set[PartitionInfo],
+    to_process_data: dict[TrackingInfo, dict[int, str]],
+    revoked_partitions: set[TrackingInfo],
     expected_cancelled: list[str],
     expected_not_cancelled: list[str],
 ) -> None:
@@ -325,23 +305,23 @@ def offset_cache_revoke_processing(
             id="only_to_commit_has_data_remains_after_revoke",
         ),
         pytest.param(
-            {PartitionInfo("test-topic", 1): {50: MagicMock(), 51: MagicMock()}},
+            {TrackingInfo("test-topic", 1): {50: MagicMock(), 51: MagicMock()}},
             [TopicPartition("test-topic", 1)],
             {},
             id="only_to_process_has_data_all_cancelled",
         ),
         pytest.param(
             {
-                PartitionInfo("topic-a", 0): {12: MagicMock()},
-                PartitionInfo("topic-b", 1): {22: "FakeFuture"},
+                TrackingInfo("topic-a", 0): {12: MagicMock()},
+                TrackingInfo("topic-b", 1): {22: "FakeFuture"},
             },
             [TopicPartition("topic-a", 0)],
-            {PartitionInfo("topic-b", 1): {22: "FakeFuture"}},
+            {TrackingInfo("topic-b", 1): {22: "FakeFuture"}},
             id="partial",
         ),
         pytest.param(
             {
-                PartitionInfo("topic-a", 0): {12: MagicMock(cancel=lambda: False)},
+                TrackingInfo("topic-a", 0): {12: MagicMock(cancel=lambda: False)},
             },
             [TopicPartition("topic-a", 0)],
             {},
@@ -352,7 +332,7 @@ def offset_cache_revoke_processing(
 def test_offset_cache_register_revoke(
     to_process_data: dict,
     partitions_to_revoke: list[TopicPartition],
-    expected_remaining_process: dict[PartitionInfo, set[int]],
+    expected_remaining_process: dict[TrackingInfo, set[int]],
 ) -> None:
     cache = TrackingManager(concurrency=16, cancel_wait_time=30.0)
     cache._TrackingManager__to_process = to_process_data
@@ -373,7 +353,7 @@ def test_offset_cache_register_revoke(
 def test_offset_cache_register_revoke_err(
     error: type[Exception],
 ) -> None:
-    stub_partition = PartitionInfo("topic-a", 0)
+    stub_partition = TrackingInfo("topic-a", 0)
     cache = TrackingManager(concurrency=16, cancel_wait_time=30.0)
     mock_future = MagicMock(spec=Future)
     mock_future.cancel.return_value = False
@@ -394,24 +374,27 @@ def test_offset_cache_schedule_commit_offset_not_in_partition(
     caplog.set_level(logging.WARNING)
     cache = TrackingManager(concurrency=16, cancel_wait_time=30.0)
 
-    # Create a mock message
-    mock_message = MagicMock(
+    # Create a MessageGroup
+    mock_inner_message = MagicMock(
         spec=Message,
         topic=lambda: "test-topic",
         partition=lambda: 0,
         offset=lambda: 42,
         value=lambda: b'{"test": "data"}',
     )
+    message_group = MessageGroup(
+        topic="test-topic", partition=0, messages={0: mock_inner_message}
+    )
 
-    partition_info = PartitionInfo("test-topic", 0)
+    partition_info = TrackingInfo("test-topic", 0)
 
     # Add partition but with DIFFERENT offsets (not including 42)
     for offset in [100, 101, 102]:
         mock_future = MagicMock(spec=Future)
-        cache._TrackingManager__to_process[partition_info][offset] = mock_future
+        cache._TrackingManager__to_process[partition_info][(offset,)] = mock_future
 
     # Try to schedule commit for offset 42 which doesn't exist in the partition
-    result = cache.schedule_commit(mock_message)
+    result = cache.schedule_commit(message_group)
 
     # In new implementation, schedule_commit always succeeds
     assert result is True
@@ -420,11 +403,11 @@ def test_offset_cache_schedule_commit_offset_not_in_partition(
     assert len(caplog.records) == 0
 
     # The offset IS added to to_commit (new behavior)
-    assert 43 in cache._TrackingManager__to_commit.get(partition_info, set())
+    assert (43,) in cache._TrackingManager__to_commit.get(partition_info, set())
 
     # Verify original offsets remain in to_process (42 wasn't there to remove)
     assert set(cache._TrackingManager__to_process[partition_info].keys()) == {
-        100,
-        101,
-        102,
+        (100,),
+        (101,),
+        (102,),
     }

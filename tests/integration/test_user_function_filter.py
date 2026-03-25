@@ -2,6 +2,7 @@
 Integration test to check for messages in headers
 
 """
+
 import asyncio
 from typing import Any
 
@@ -48,7 +49,9 @@ async def test_filter_for_message_headers(
 
         await scaffold.send_messages(1, headers={"repository_name": b"helm-charts"})
         await scaffold.send_messages(1, headers={"repository_name": b"other-repo"})
-        await scaffold.send_messages(1, headers={"repository_name": b"my/helm-charts/repo"})
+        await scaffold.send_messages(
+            1, headers={"repository_name": b"my/helm-charts/repo"}
+        )
         await scaffold.send_messages(1)
 
         # Helper function that processes only filtered related messages

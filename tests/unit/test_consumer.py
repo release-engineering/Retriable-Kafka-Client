@@ -10,7 +10,13 @@ from confluent_kafka import Message, KafkaException, TopicPartition, KafkaError
 
 from retriable_kafka_client import BaseConsumer, ConsumerConfig
 from retriable_kafka_client.config import ConsumeTopicConfig
-from retriable_kafka_client.consumer_tracking import _PartitionInfo as PartitionInfo
+from retriable_kafka_client.headers import (
+    CHUNK_GROUP_HEADER,
+    NUMBER_OF_CHUNKS_HEADER,
+    serialize_number_to_bytes,
+    CHUNK_ID_HEADER,
+)
+from retriable_kafka_client.kafka_utils import TrackingInfo, MessageGroup
 
 
 @pytest.fixture
@@ -55,23 +61,57 @@ def test_consumer__process_message_decode_fail(
 ) -> None:
     caplog.set_level(logging.DEBUG)
     mock_message = MagicMock(
-        spec=Message, value=lambda: b"---\nthis: is not a json\n", error=lambda: None
+        spec=Message,
+        value=lambda: b"---\nthis: is not a json\n",
+        error=lambda: None,
+        topic=lambda: "test-topic",
+        partition=lambda: 0,
+        offset=lambda: 0,
+        headers=lambda: None,
     )
 
     assert base_consumer._process_message(mock_message) is None
     assert "Decoding error: not a valid JSON" in caplog.messages[-1]
 
 
+def test_process_message_skip_chunk(
+    base_consumer: BaseConsumer,
+):
+    mock_message = MagicMock(
+        spec=Message,
+    )
+    mock_message.headers.return_value = [
+        (CHUNK_GROUP_HEADER, b"foo"),
+        (NUMBER_OF_CHUNKS_HEADER, serialize_number_to_bytes(3)),
+        (CHUNK_ID_HEADER, serialize_number_to_bytes(0)),
+    ]
+    mock_message.topic.return_value = "foo_topic"
+    mock_message.partition.return_value = 0
+    result = base_consumer._process_message(mock_message)
+    assert result is None
+
+
 def test_consumer__process_message_empty_value(
     base_consumer: BaseConsumer,
 ) -> None:
-    """Test that empty messages are discarded and committed."""
-    mock_message = MagicMock(spec=Message, value=lambda: None, error=lambda: None)
-    mock_consumer = base_consumer._consumer
-    mock_consumer.commit = MagicMock()
+    """Test that empty messages are discarded and scheduled for commit."""
+    mock_message = MagicMock(
+        spec=Message,
+        value=lambda: None,
+        error=lambda: None,
+        topic=lambda: "test-topic",
+        partition=lambda: 0,
+        offset=lambda: 0,
+        headers=lambda: None,
+    )
 
     result = base_consumer._process_message(mock_message)
     assert result is None
+    tracking_manager = base_consumer._BaseConsumer__tracking_manager
+    partition_info = TrackingInfo("test-topic", 0)
+    assert (1,) in tracking_manager._TrackingManager__to_commit.get(
+        partition_info, set()
+    )
 
 
 def test_consumer__process_message_valid_json(
@@ -81,7 +121,13 @@ def test_consumer__process_message_valid_json(
     message_data = {"key": "value", "number": 42}
     message_json = json.dumps(message_data).encode()
     mock_message = MagicMock(
-        spec=Message, value=lambda: message_json, error=lambda: None
+        spec=Message,
+        value=lambda: message_json,
+        error=lambda: None,
+        topic=lambda: "test-topic",
+        partition=lambda: 0,
+        offset=lambda: 0,
+        headers=lambda: None,
     )
 
     with patch.object(base_consumer._executor, "submit") as mock_submit:
@@ -123,9 +169,11 @@ def test_consumer__graceful_shutdown(
     base_consumer._executor = MagicMock()
 
     # Pre-fill the tracking manager
-    partition_info = PartitionInfo("test-topic", 0)
+    partition_info = TrackingInfo("test-topic", 0)
     tracking_manager = base_consumer._BaseConsumer__tracking_manager
-    tracking_manager._TrackingManager__to_commit[partition_info].update({100, 101, 102})
+    tracking_manager._TrackingManager__to_commit[partition_info].update(
+        {(100,), (101,), (102,)}
+    )
 
     # Verify cache has data
     assert len(tracking_manager._TrackingManager__to_commit[partition_info]) == 3
@@ -299,17 +347,16 @@ def test_perform_commits_logic(
     mock_consumer = base_consumer._consumer
     mock_consumer.commit = MagicMock()
 
-    partition_info = PartitionInfo("test-topic", 0)
+    partition_info = TrackingInfo("test-topic", 0)
     tracking_manager = base_consumer._BaseConsumer__tracking_manager
     if to_process_offsets:
-        # __to_process now stores dict[int, Future]
         for offset in to_process_offsets:
-            tracking_manager._TrackingManager__to_process[partition_info][offset] = (
+            tracking_manager._TrackingManager__to_process[partition_info][(offset,)] = (
                 MagicMock(spec=Future)
             )
     if to_commit_offsets:
         tracking_manager._TrackingManager__to_commit[partition_info].update(
-            to_commit_offsets
+            {(offset,) for offset in to_commit_offsets}
         )
 
     base_consumer._BaseConsumer__perform_commits()
@@ -326,11 +373,11 @@ def test_perform_commits_failed(base_consumer: BaseConsumer) -> None:
     mock_consumer = base_consumer._consumer
     mock_consumer.commit = MagicMock(side_effect=KafkaException())
 
-    partition_info = PartitionInfo("test-topic", 0)
+    partition_info = TrackingInfo("test-topic", 0)
     tracking_manager = base_consumer._BaseConsumer__tracking_manager
-    tracking_manager._TrackingManager__to_commit[partition_info] = {1}
+    tracking_manager._TrackingManager__to_commit[partition_info] = {(1,)}
     base_consumer._BaseConsumer__perform_commits()
-    assert tracking_manager._TrackingManager__to_commit[partition_info] == {1}
+    assert tracking_manager._TrackingManager__to_commit[partition_info] == {(1,)}
 
 
 @pytest.mark.parametrize(
@@ -350,11 +397,11 @@ def test_on_revoke(
     mock_consumer.commit = MagicMock()
 
     # Pre-fill the tracking manager if needed
-    partition_info = PartitionInfo("test-topic", 0)
+    partition_info = TrackingInfo("test-topic", 0)
     tracking_manager = base_consumer._BaseConsumer__tracking_manager
     if to_commit_offsets:
         tracking_manager._TrackingManager__to_commit[partition_info].update(
-            to_commit_offsets
+            {(offset,) for offset in to_commit_offsets}
         )
 
     # Create mock partitions list (required by on_revoke signature)
@@ -381,7 +428,8 @@ def test_on_revoke(
 def test_ack_message_cancelled(base_consumer: BaseConsumer) -> None:
     mock_future = MagicMock(spec=Future)
     mock_future.cancelled = lambda: True
-    base_consumer._BaseConsumer__ack_message(MagicMock(), mock_future)
+    mock_message_group = MagicMock(spec=MessageGroup)
+    base_consumer._BaseConsumer__ack_message(mock_message_group, mock_future)
     mock_future.exception.assert_not_called()
 
 
@@ -400,13 +448,16 @@ def test_ack_message_with_exception(
     mock_retry_manager = MagicMock()
     base_consumer._BaseConsumer__retry_manager = mock_retry_manager
 
-    # Create a mock message
-    mock_message = MagicMock(
+    # Create a MessageGroup
+    mock_inner_message = MagicMock(
         spec=Message,
         value=lambda: b'{"test": "data"}',
-        topic=lambda: "test-topic",
-        partition=lambda: 0,
         offset=lambda: 42,
+    )
+    message_group = MessageGroup(
+        topic="test-topic",
+        partition=0,
+        messages={0: mock_inner_message},
     )
 
     # Create a mock future that raises an exception
@@ -416,19 +467,19 @@ def test_ack_message_with_exception(
     mock_future.cancelled.return_value = False
 
     # Call __ack_message
-    base_consumer._BaseConsumer__ack_message(mock_message, mock_future)
+    base_consumer._BaseConsumer__ack_message(message_group, mock_future)
 
     # Verify tracking manager schedule_commit was called
-    mock_tracking_manager.schedule_commit.assert_called_once_with(mock_message)
+    mock_tracking_manager.schedule_commit.assert_called_once_with(message_group)
 
     # Verify retry manager was called to resend the message
-    mock_retry_manager.resend_message.assert_called_once_with(mock_message)
+    mock_retry_manager.resend_message.assert_called_once_with(message_group)
 
     # Verify error was logged
     assert len(caplog.records) == 1
     assert caplog.records[0].levelname == "ERROR"
     assert "Message could not be processed!" in caplog.records[0].message
-    assert '{"test": "data"}' in caplog.records[0].message
+    assert "test" in caplog.records[0].message
     assert caplog.records[0].exc_info[1] is test_exception
 
 
@@ -574,6 +625,7 @@ def test_consumer_with_filter_function(
     Test that filter_function receives message with accessible headers
     and filters messages correctly
     """
+
     # Helper filter function to check for message in headers
     def filter_with_header_access(msg: Message) -> bool:
         headers = msg.headers()

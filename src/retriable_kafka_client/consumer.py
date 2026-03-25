@@ -1,6 +1,5 @@
 """Base Kafka Consumer module"""
 
-import json
 import logging
 import sys
 from concurrent.futures import Executor, Future
@@ -9,8 +8,9 @@ from typing import Any
 
 from confluent_kafka import Consumer, Message, KafkaException, TopicPartition
 
+from .chunking import ChunkingCache
 from .health import perform_healthcheck_using_client
-from .kafka_utils import message_to_partition
+from .kafka_utils import message_to_partition, MessageGroup
 from .kafka_settings import KafkaOptions, DEFAULT_CONSUMER_SETTINGS
 from .consumer_tracking import TrackingManager
 from .config import ConsumerConfig
@@ -91,6 +91,8 @@ class BaseConsumer:
         self.__retry_manager = RetryManager(config)
         # Store information about pending retried messages
         self.__schedule_cache = RetryScheduleCache()
+        # Store chunking information
+        self.__chunk_tracker = ChunkingCache()
 
     @property
     def _consumer(self) -> Consumer:
@@ -140,7 +142,7 @@ class BaseConsumer:
         self.__tracking_manager.register_revoke(partitions)
         self.__perform_commits()
 
-    def __ack_message(self, message: Message, finished_future: Future) -> None:
+    def __ack_message(self, message: MessageGroup, finished_future: Future) -> None:
         """
         Private method only ever intended to be used from within
         _process_message(). It commits offsets and releases
@@ -155,7 +157,7 @@ class BaseConsumer:
             if problem := finished_future.exception():
                 LOGGER.error(
                     "Message could not be processed! Message: %s.",
-                    message.value(),
+                    message.deserialize(),
                     exc_info=problem,
                 )
                 self.__retry_manager.resend_message(message)
@@ -212,20 +214,17 @@ class BaseConsumer:
         Returns: Future of the target execution if the message can be processed.
             None otherwise.
         """
-        message_value = message.value()
-        if not message_value:
-            # Discard empty messages
+        message_group = self.__chunk_tracker.receive(message)
+        if not message_group:
             return None
-        try:
-            message_data = json.loads(message_value)
-        except json.decoder.JSONDecodeError:
-            # This message cannot be deserialized, just log and discard it
-            LOGGER.exception("Decoding error: not a valid JSON: %s", message.value())
+        message_data = message_group.deserialize()
+        if not message_data:
+            self.__tracking_manager.schedule_commit(message_group)
             return None
         future = self._executor.submit(self._config.target, message_data)
-        self.__tracking_manager.process_message(message, future)
+        self.__tracking_manager.process_message(message_group, future)
         # The semaphore is released within this callback
-        future.add_done_callback(lambda res: self.__ack_message(message, res))
+        future.add_done_callback(lambda res: self.__ack_message(message_group, res))
         return future
 
     ### Public methods ###

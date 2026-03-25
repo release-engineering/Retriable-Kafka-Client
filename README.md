@@ -47,6 +47,25 @@ This whole mechanism **does not ensure message ordering**. When a message is
 sent to be retried, another message processing from the same topic is still
 unblocked.
 
+### Message splitting
+
+This library also supports sending large messages to topics which don't have
+the capacity to process these messages as whole. To do this, producers are
+configurable to automatically split messages according to message size.
+
+This feature is custom and is therefore turned off by default. The only place
+this feature is always enabled are retry-topics, which are meant to be consumed
+only by clients using this library.
+
+The chunked messages have 3 additional headers:
+
+* Group ID (uuid4 value)
+* Chunk ID (serial number of the chunk within group, starting with 0)
+* Number of chunks (is always +1 from the last chunk ID)
+
+Message is deserialized and processed only if all expected chunks have been
+found.
+
 ## Contributing guidelines
 
 To check contributing guidelines, please check `CONTRIBUTING.md` in the
