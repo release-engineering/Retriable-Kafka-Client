@@ -3,51 +3,19 @@
 import logging
 from collections import defaultdict
 from concurrent.futures import Future
+from itertools import chain
 from threading import Lock, Semaphore
-from typing import NamedTuple, Any
+from typing import Any, Iterable
 
-from confluent_kafka import Message, TopicPartition
+from confluent_kafka import TopicPartition
+
+from retriable_kafka_client.kafka_utils import TrackingInfo, MessageGroup
 
 LOGGER = logging.getLogger(__name__)
 
 
-class _PartitionInfo(NamedTuple):
-    """
-    Consistently hashable dataclass for storing information about a partition,
-    namely offset information. Can be used as keys in a dictionary.
-    """
-
-    topic: str
-    partition: int
-
-    @staticmethod
-    def from_message(message: Message) -> "_PartitionInfo":
-        """
-        Create a PartitionInfo from a Kafka message.
-        Args:
-             message: Kafka message object
-        Returns: hashable info about a partition
-        """
-        message_topic = message.topic()
-        message_partition = message.partition()
-        # This should never happen with polled messages. Polled messages need
-        # the information asserted to be valid Kafka messages. This can
-        # happen only for custom-created messages objects, which this
-        # method is not intended to be used for
-        assert message_topic is not None and message_partition is not None, (
-            "Invalid message cannot be converted to partition info"
-        )
-        return _PartitionInfo(message_topic, message_partition)
-
-    def to_offset_info(self, offset: int) -> TopicPartition:
-        """
-        Create a Kafka-committable object using the provided offset.
-        Args:
-            offset: The offset to be committed. Make sure to commit
-                offset one higher than the latest processed message.
-        Returns: The committable Kafka object
-        """
-        return TopicPartition(topic=self.topic, partition=self.partition, offset=offset)
+def _flatten_offsets(done_offsets: Iterable[tuple[int, ...]]) -> list[int]:
+    return list(chain(*done_offsets))
 
 
 class TrackingManager:
@@ -85,8 +53,10 @@ class TrackingManager:
     """
 
     def __init__(self, concurrency: int, cancel_wait_time: float):
-        self.__to_process: dict[_PartitionInfo, dict[int, Future]] = defaultdict(dict)
-        self.__to_commit: dict[_PartitionInfo, set[int]] = defaultdict(set)
+        self.__to_process: dict[TrackingInfo, dict[tuple[int, ...], Future]] = (
+            defaultdict(dict)
+        )
+        self.__to_commit: dict[TrackingInfo, set[tuple[int, ...]]] = defaultdict(set)
         self.__access_lock = Lock()  # For handling multithreaded access to this object
         self.__semaphore = Semaphore(concurrency)
         self.__cancel_wait_time = cancel_wait_time
@@ -105,15 +75,15 @@ class TrackingManager:
         """
         to_commit = []
         with self.__access_lock:
-            for partition_info, pending_to_commit in self.__to_commit.items():
-                if not pending_to_commit:
+            for partition_info, tuples_pending_to_commit in self.__to_commit.items():
+                if not tuples_pending_to_commit:
                     # Nothing to commit
                     continue
 
-                pending_to_process = self.__to_process.get(partition_info, None)
-                if not pending_to_process:
+                tuples_pending_to_process = self.__to_process.get(partition_info, None)
+                if not tuples_pending_to_process:
                     # Nothing is blocking the committing
-                    max_to_commit = max(pending_to_commit)
+                    max_to_commit = max(_flatten_offsets(tuples_pending_to_commit))
                     to_commit.append(
                         TopicPartition(
                             topic=partition_info.topic,
@@ -123,17 +93,18 @@ class TrackingManager:
                     )
                     self.__to_commit[partition_info] = set()
                     continue
-
-                min_pending_to_process = min(pending_to_process)
+                min_pending_to_process = min(
+                    _flatten_offsets(tuples_pending_to_process)
+                )
                 commit_candidates = {
-                    offset
-                    for offset in pending_to_commit
-                    if offset < min_pending_to_process
+                    offset_tuple
+                    for offset_tuple in tuples_pending_to_commit
+                    if all(offset < min_pending_to_process for offset in offset_tuple)
                 }
                 if not commit_candidates:
                     # Nothing to commit
                     continue
-                max_to_commit = max(commit_candidates)
+                max_to_commit = max(_flatten_offsets(commit_candidates))
                 to_commit.append(
                     TopicPartition(
                         topic=partition_info.topic,
@@ -157,11 +128,11 @@ class TrackingManager:
             failed_committable: list of data that failed to be committed
         """
         for failed in failed_committable:
-            self.__to_commit.setdefault(
-                _PartitionInfo(topic=failed.topic, partition=failed.partition), set()
-            ).add(failed.offset)
+            self.__to_commit[
+                TrackingInfo(topic=failed.topic, partition=failed.partition)
+            ].add((failed.offset,))
 
-    def process_message(self, message: Message, future: Future[Any]) -> None:
+    def process_message(self, message: MessageGroup, future: Future[Any]) -> None:
         """
         Mark message as pending for processing.
         Args:
@@ -170,15 +141,16 @@ class TrackingManager:
         """
         # We cannot really use context manager, the semaphore is released in
         # future's callback or when the future is cancelled
+
         self.__semaphore.acquire()  # pylint: disable=consider-using-with
-        message_offset: int = message.offset()  # type: ignore[assignment]
+        message_offsets = message.offsets
         with self.__access_lock:
             # Mark the message as being processed
-            self.__to_process[_PartitionInfo.from_message(message)][
-                message_offset + 1
+            self.__to_process[TrackingInfo.from_message_group(message)][
+                tuple(message_offset + 1 for message_offset in message_offsets)
             ] = future
 
-    def schedule_commit(self, message: Message) -> bool:
+    def schedule_commit(self, message: MessageGroup) -> bool:
         """
         Mark message as pending for committing when its processing is fully done.
         Args:
@@ -188,12 +160,12 @@ class TrackingManager:
             as pending for processing), False otherwise
         """
         self.__semaphore.release()
-        partition_info = _PartitionInfo.from_message(message)
-        message_offset: int = message.offset()  # type: ignore[assignment]
-        stored_offset = message_offset + 1
+        partition_info = TrackingInfo.from_message_group(message)
+        message_offsets = message.offsets
+        stored_offsets = tuple(message_offset + 1 for message_offset in message_offsets)
         with self.__access_lock:
-            self.__to_process[partition_info].pop(stored_offset, None)
-            self.__to_commit.setdefault(partition_info, set()).add(stored_offset)
+            self.__to_process[partition_info].pop(stored_offsets, None)
+            self.__to_commit.setdefault(partition_info, set()).add(stored_offsets)
         self._cleanup()
         return True
 
@@ -212,7 +184,7 @@ class TrackingManager:
                     cache_to_clean.pop(key, None)
 
     def _revoke_processing(
-        self, revoked_partitions: set[_PartitionInfo]
+        self, revoked_partitions: set[TrackingInfo]
     ) -> list[Future[Any]]:
         """
         Cancel all pending tracked futures related to the given partitions.
@@ -253,7 +225,7 @@ class TrackingManager:
             revoked_partition_keys = set(self.__to_process.keys())
         else:
             revoked_partition_keys = {
-                _PartitionInfo(partition=partition.partition, topic=partition.topic)
+                TrackingInfo(partition=partition.partition, topic=partition.topic)
                 for partition in partitions
             }
         pending_futures = self._revoke_processing(revoked_partition_keys)
