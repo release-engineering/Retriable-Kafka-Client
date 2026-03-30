@@ -312,6 +312,7 @@ class IntegrationTestScaffold:
         fail_consistently: bool = False,
         max_concurrency: int = 4,
         max_workers: int = 2,
+        filter_function: Callable[[Any], bool] | None = None,
     ) -> ConsumerHandle:
         """
         Create and start a consumer with the specified configuration.
@@ -322,6 +323,7 @@ class IntegrationTestScaffold:
             fail_consistently: If True, always fail processing
             max_concurrency: Consumer concurrency limit
             max_workers: Thread pool size
+            filter_function: Filters messages based on the user-provided function
 
         Returns:
             A ConsumerHandle that can be used to stop the consumer.
@@ -346,6 +348,7 @@ class IntegrationTestScaffold:
             password=self.kafka_config[KafkaOptions.PASSWORD],
             group_id=self.config.group_id,
             target=target,
+            filter_function=filter_function,
             additional_settings={KafkaOptions.SECURITY_PROTO: "SASL_PLAINTEXT"},
         )
 

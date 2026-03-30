@@ -264,6 +264,25 @@ class BaseConsumer:
                     LOGGER.debug("Consumer error: %s", error.str())
                     continue
 
+                # Message filtering based on the user-provided function
+                if self._config.filter_function is not None:
+                    try:
+                        if not self._config.filter_function(msg):
+                            LOGGER.debug(
+                                "Message was filtered out, topic %s",
+                                msg.topic(),
+                            )
+                            self._consumer.commit(msg)
+                            continue
+                    except Exception as filter_error:  # pylint: disable=broad-exception-caught
+                        LOGGER.warning(
+                            "Filter raised an exception: %s.",
+                            filter_error,
+                            exc_info=True,
+                        )
+                        self._consumer.commit(msg)
+                        continue
+
                 current_offset = msg.offset()
                 partition = message_to_partition(msg)
                 LOGGER.debug("Consumer received message at offset: %s", current_offset)
