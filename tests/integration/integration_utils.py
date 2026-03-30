@@ -387,12 +387,14 @@ class IntegrationTestScaffold:
             except Exception:
                 pass
 
-    async def send_messages(self, count: int) -> list[dict[str, Any]]:
+    async def send_messages(
+        self, count: int, headers: dict[str, bytes] | None = None) -> list[dict[str, Any]]:
         """
         Generate and send messages.
 
         Args:
             count: Number of messages to send.
+            headers: Message headers (optional parameter)
 
         Returns:
             The list of messages that were sent.
@@ -403,7 +405,7 @@ class IntegrationTestScaffold:
         messages = self.generator.generate(count)
 
         for msg in messages:
-            await self._producer.send(msg)
+            await self._producer.send(msg, headers=headers)
 
         # Update tracking
         self.messages_sent += count

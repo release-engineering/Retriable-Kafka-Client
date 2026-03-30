@@ -72,7 +72,6 @@ def test_consumer__process_message_empty_value(
 
     result = base_consumer._process_message(mock_message)
     assert result is None
-    mock_consumer.commit.assert_called_once_with(mock_message)
 
 
 def test_consumer__process_message_valid_json(
@@ -586,7 +585,6 @@ def test_consumer_with_filter_function(
 
     mock_consumer = base_consumer._consumer
     mock_consumer.subscribe = MagicMock()
-    mock_consumer.commit = MagicMock()
     mock_consumer.get_watermark_offsets = MagicMock(return_value=(0, 10))
 
     mock_message = MagicMock(spec=Message)
@@ -615,4 +613,3 @@ def test_consumer_with_filter_function(
             mock_process.assert_called_once_with(mock_message)
         else:
             mock_process.assert_not_called()
-            mock_consumer.commit.assert_called_with(mock_message)

@@ -23,7 +23,7 @@ async def test_filter_for_message_headers(
 ) -> None:
     """
     Test that filter_function can access messages in headers
-    and then filters them, e.g. checking for helm-charts in repository_name
+    and then filters them
     """
     config = ScaffoldConfig(
         topics=[
@@ -32,8 +32,8 @@ async def test_filter_for_message_headers(
         group_id="test-filter-headers-group",
     )
 
-    # Helper filter function that accesses headers and filters by repository_name
-    def filter_helm_charts_only(msg: Message) -> bool:
+    # Helper filter function that accesses headers
+    def filter_headers(msg: Message) -> bool:
         headers = msg.headers()
         if headers is None:
             return False
@@ -43,21 +43,15 @@ async def test_filter_for_message_headers(
         return False
 
     async with IntegrationTestScaffold(kafka_config, admin_client, config) as scaffold:
-        scaffold.start_consumer(filter_function=filter_helm_charts_only)
+        scaffold.start_consumer(filter_function=filter_headers)
         await asyncio.sleep(2)
 
-        # Checkinf for different messgaes in the header
-        await scaffold._producer.send({"id": 0}, headers={"repository_name": b"helm-charts"})
-        await scaffold._producer.send({"id": 1}, headers={"repository_name": b"other-repo"})
-        await scaffold._producer.send({"id": 2}, headers={"repository_name": b"my/helm-charts/repo"})
-        await scaffold._producer.send({"id": 3}, headers=None)
+        await scaffold.send_messages(1, headers={"repository_name": b"helm-charts"})
+        await scaffold.send_messages(1, headers={"repository_name": b"other-repo"})
+        await scaffold.send_messages(1, headers={"repository_name": b"my/helm-charts/repo"})
+        await scaffold.send_messages(1)
 
-        scaffold._producer.close()
-
-        scaffold.messages_sent = 4
-        scaffold.tracker._message_count = 4
-
-        # Helper function that processes only helm-chart related messages
+        # Helper function that processes only filtered related messages
         def check_filtered_messages(
             _: dict[int, int], successful_messages: dict[int, int]
         ) -> bool:
