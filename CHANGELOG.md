@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.5.0](https://github.com/release-engineering/Retriable-Kafka-Client/compare/v0.4.0...v0.5.0) (2026-03-31)
+
+
+### Features
+
+* **ISV-6803:** mercury filters github events ([#18](https://github.com/release-engineering/Retriable-Kafka-Client/issues/18)) ([cf4a4d1](https://github.com/release-engineering/Retriable-Kafka-Client/commit/cf4a4d1c5b394ac9ed8e9d04dcf996cab5e962ad))
+
 ## [0.4.0](https://github.com/release-engineering/Retriable-Kafka-Client/compare/v0.3.0...v0.4.0) (2026-03-12)
 
 
