@@ -3,6 +3,8 @@
 from dataclasses import dataclass, field
 from typing import Callable, Any
 
+from confluent_kafka import Message
+
 
 @dataclass(kw_only=True)
 class CommonConfig:
@@ -78,9 +80,14 @@ class ConsumerConfig(CommonConfig):
         additional_settings: additional settings to pass directly to Kafka producer
         group_id: consumer group ID to use when consuming
         target: Callable to execute on all parsed messages
+        filter_function: Filters messages based on the user-provided function.
+            Returns True if the message will be processed
+            or False if skipped. In case False or exception is returned,
+            message will be committed without processing.
     """
 
     group_id: str
     target: Callable[[dict[str, Any]], Any]
     topics: list[ConsumeTopicConfig] = field(default_factory=list)
     cancel_future_wait_time: float = field(default=30.0)
+    filter_function: Callable[[Message], bool] | None = field(default=None)

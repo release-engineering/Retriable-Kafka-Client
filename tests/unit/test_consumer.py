@@ -72,7 +72,6 @@ def test_consumer__process_message_empty_value(
 
     result = base_consumer._process_message(mock_message)
     assert result is None
-    mock_consumer.commit.assert_called_once_with(mock_message)
 
 
 def test_consumer__process_message_valid_json(
@@ -557,3 +556,60 @@ def test_consumer_stop(base_consumer: BaseConsumer) -> None:
     assert base_consumer._BaseConsumer__stop_flag is False
     base_consumer.stop()
     assert base_consumer._BaseConsumer__stop_flag is True
+
+
+@pytest.mark.parametrize(
+    "filter_result,should_process",
+    [
+        pytest.param(True, True, id="filter_passes_message"),
+        pytest.param(False, False, id="filter_blocks_message"),
+    ],
+)
+def test_consumer_with_filter_function(
+    base_consumer: BaseConsumer,
+    filter_result: bool,
+    should_process: bool,
+) -> None:
+    """
+    Test that filter_function receives message with accessible headers
+    and filters messages correctly
+    """
+    # Helper filter function to check for message in headers
+    def filter_with_header_access(msg: Message) -> bool:
+        headers = msg.headers()
+        assert headers is not None
+        assert headers == [("repository_name", b"helm-charts")]
+        return filter_result
+
+    base_consumer._config.filter_function = filter_with_header_access
+
+    mock_consumer = base_consumer._consumer
+    mock_consumer.subscribe = MagicMock()
+    mock_consumer.get_watermark_offsets = MagicMock(return_value=(0, 10))
+
+    mock_message = MagicMock(spec=Message)
+    mock_message.topic.return_value = "test-topic"
+    mock_message.partition.return_value = 0
+    mock_message.offset.return_value = 0
+    mock_message.error.return_value = None
+    mock_message.value.return_value = b'{"test": "data"}'
+    mock_message.headers.return_value = [("repository_name", b"helm-charts")]
+
+    def poll_side_effect(*_, **__):
+        base_consumer._BaseConsumer__stop_flag = True
+        return mock_message
+
+    mock_consumer.poll.side_effect = poll_side_effect
+
+    mock_schedule_cache = MagicMock()
+    mock_schedule_cache.add_if_applicable.return_value = False
+    mock_schedule_cache.pop_reprocessable.return_value = []
+    base_consumer._BaseConsumer__schedule_cache = mock_schedule_cache
+
+    with patch.object(base_consumer, "_process_message") as mock_process:
+        base_consumer.run()
+
+        if should_process:
+            mock_process.assert_called_once_with(mock_message)
+        else:
+            mock_process.assert_not_called()

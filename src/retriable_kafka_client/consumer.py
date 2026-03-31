@@ -215,14 +215,12 @@ class BaseConsumer:
         message_value = message.value()
         if not message_value:
             # Discard empty messages
-            self._consumer.commit(message)
             return None
         try:
             message_data = json.loads(message_value)
         except json.decoder.JSONDecodeError:
             # This message cannot be deserialized, just log and discard it
             LOGGER.exception("Decoding error: not a valid JSON: %s", message.value())
-            self._consumer.commit(message)
             return None
         future = self._executor.submit(self._config.target, message_data)
         self.__tracking_manager.process_message(message, future)
@@ -263,6 +261,23 @@ class BaseConsumer:
                 if error := msg.error():
                     LOGGER.debug("Consumer error: %s", error.str())
                     continue
+
+                # Message filtering based on the user-provided function
+                if self._config.filter_function is not None:
+                    try:
+                        if not self._config.filter_function(msg):
+                            LOGGER.debug(
+                                "Message was filtered out, topic %s",
+                                msg.topic(),
+                            )
+                            continue
+                    except Exception as filter_error:  # pylint: disable=broad-exception-caught
+                        LOGGER.exception(
+                            "Filter raised an exception: %s.",
+                            filter_error,
+                            exc_info=True,
+                        )
+                        continue
 
                 current_offset = msg.offset()
                 partition = message_to_partition(msg)
