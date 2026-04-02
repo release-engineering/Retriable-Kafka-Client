@@ -5,7 +5,7 @@ import json
 import logging
 import time
 from copy import copy
-from typing import Any
+from typing import Any, Generator
 
 from confluent_kafka import Producer, KafkaException
 
@@ -122,6 +122,24 @@ class BaseProducer:
                 LOGGER.error("Cannot produce to topic %s: %s", problem_topic, problem)
             raise next(iter(problems.values()))
 
+    def _prepare_chunks(
+        self,
+        group_id: bytes,
+        message: dict[str, Any] | bytes | list[bytes],
+        headers: dict[str, str | bytes] | None = None,
+    ) -> Generator[tuple[bytes, dict[str, str | bytes] | None]]:
+        chunks = self.__serialize_message(message, headers, self._config.split_messages)
+        number_of_chunks = len(chunks)
+        for chunk_id, chunk in enumerate(chunks):
+            chunk_headers = copy(headers) if headers else {}
+            if self._config.split_messages:
+                chunk_headers[CHUNK_GROUP_HEADER] = group_id
+                chunk_headers[NUMBER_OF_CHUNKS_HEADER] = serialize_number_to_bytes(
+                    number_of_chunks
+                )
+                chunk_headers[CHUNK_ID_HEADER] = serialize_number_to_bytes(chunk_id)
+            yield (chunk, chunk_headers)
+
     def send_sync(
         self,
         message: dict[str, Any] | bytes | list[bytes],
@@ -139,27 +157,18 @@ class BaseProducer:
             BufferError: if Kafka queue is full even after all attempts
             KafkaException: if some Kafka error occurs even after all attempts
         """
-        chunks = self.__serialize_message(message, headers, self._config.split_messages)
-        number_of_chunks = len(chunks)
         problems: dict[str, Exception] = {}
         timestamp = int(time.time() * 1000)  # Kafka expects milliseconds
         for topic in self._config.topics:
             group_id = generate_group_id()
-            for chunk_id, chunk in enumerate(chunks):
-                headers = copy(headers) if headers else {}
-                if self._config.split_messages:
-                    headers[CHUNK_GROUP_HEADER] = group_id
-                    headers[NUMBER_OF_CHUNKS_HEADER] = serialize_number_to_bytes(
-                        number_of_chunks
-                    )
-                    headers[CHUNK_ID_HEADER] = serialize_number_to_bytes(chunk_id)
+            for chunk, chunk_headers in self._prepare_chunks(group_id, message, headers):
                 for attempt_idx in range(self._config.retries + 1):
                     try:
                         self._producer.produce(
                             topic=topic,
                             value=chunk,
                             timestamp=timestamp,
-                            headers=headers,
+                            headers=chunk_headers,
                             key=group_id,
                         )
                         break
@@ -190,27 +199,18 @@ class BaseProducer:
             BufferError: if Kafka queue is full even after all attempts
             KafkaException: if some Kafka error occurs even after all attempts
         """
-        chunks = self.__serialize_message(message, headers, self._config.split_messages)
-        number_of_chunks = len(chunks)
         problems: dict[str, Exception] = {}
         timestamp = int(time.time() * 1000)  # Kafka expects milliseconds
         for topic in self._config.topics:
             group_id = generate_group_id()
-            for chunk_id, chunk in enumerate(chunks):
-                headers = copy(headers) if headers else {}
-                if self._config.split_messages:
-                    headers[CHUNK_GROUP_HEADER] = group_id
-                    headers[NUMBER_OF_CHUNKS_HEADER] = serialize_number_to_bytes(
-                        number_of_chunks
-                    )
-                    headers[CHUNK_ID_HEADER] = serialize_number_to_bytes(chunk_id)
+            for chunk, chunk_headers in self._prepare_chunks(group_id, message, headers):
                 for attempt_idx in range(self._config.retries + 1):
                     try:
                         self._producer.produce(
                             topic=topic,
                             value=chunk,
                             timestamp=timestamp,
-                            headers=headers,
+                            headers=chunk_headers,
                             key=group_id,
                         )
                         break
