@@ -77,6 +77,11 @@ def test_consumer__process_message_decode_fail(
 def test_process_message_skip_chunk(
     base_consumer: BaseConsumer,
 ):
+    """
+    Check that the message chunk is not sent to processing
+    by checking that its _process_message call doesn't
+    return a future.
+    """
     mock_message = MagicMock(
         spec=Message,
     )

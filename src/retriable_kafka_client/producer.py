@@ -161,7 +161,9 @@ class BaseProducer:
         timestamp = int(time.time() * 1000)  # Kafka expects milliseconds
         for topic in self._config.topics:
             group_id = generate_group_id()
-            for chunk, chunk_headers in self._prepare_chunks(group_id, message, headers):
+            for chunk, chunk_headers in self._prepare_chunks(
+                group_id, message, headers
+            ):
                 for attempt_idx in range(self._config.retries + 1):
                     try:
                         self._producer.produce(
@@ -203,7 +205,9 @@ class BaseProducer:
         timestamp = int(time.time() * 1000)  # Kafka expects milliseconds
         for topic in self._config.topics:
             group_id = generate_group_id()
-            for chunk, chunk_headers in self._prepare_chunks(group_id, message, headers):
+            for chunk, chunk_headers in self._prepare_chunks(
+                group_id, message, headers
+            ):
                 for attempt_idx in range(self._config.retries + 1):
                     try:
                         self._producer.produce(
