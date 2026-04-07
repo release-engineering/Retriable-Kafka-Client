@@ -6,6 +6,7 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
+from datetime import timedelta
 from typing import Any, Callable
 
 from confluent_kafka.admin import AdminClient, NewTopic
@@ -187,7 +188,7 @@ class MockTarget:
             call_count = self.tracker.call_counts.get(message_id, 0)
             self.tracker.call_counts[message_id] = call_count + 1
         if self.fail_consistently or (
-            call_count == 0 and random.random() < self.fail_chance_on_first
+            call_count == 0 and (random.random() < self.fail_chance_on_first)
         ):
             raise ValueError("Simulated error")
         with self.tracker.lock:
@@ -237,6 +238,7 @@ class ScaffoldConfig:
     group_id: str
     timeout: float = 15.0
     split_messages: bool = False
+    max_chunk_reassembly_wait_time: timedelta = field(default=timedelta(seconds=10))
     additional_settings: dict[str, Any] = field(default_factory=dict)
 
 
@@ -365,6 +367,7 @@ class IntegrationTestScaffold:
             group_id=self.config.group_id,
             target=target,
             filter_function=filter_function,
+            max_chunk_reassembly_wait_time=self.config.max_chunk_reassembly_wait_time,
             additional_settings={
                 KafkaOptions.SECURITY_PROTO: "SASL_PLAINTEXT",
                 **self.config.additional_settings,

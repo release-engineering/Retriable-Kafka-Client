@@ -8,7 +8,6 @@ from typing import Any
 
 from confluent_kafka import Consumer, Message, KafkaException, TopicPartition
 
-from .chunking import ChunkingCache
 from .health import perform_healthcheck_using_client
 from .kafka_utils import message_to_partition, MessageGroup
 from .kafka_settings import KafkaOptions, DEFAULT_CONSUMER_SETTINGS
@@ -85,14 +84,14 @@ class BaseConsumer:
         self.__stop_flag: bool = False
         # Store information about offsets and tasks
         self.__tracking_manager = TrackingManager(
-            max_concurrency, config.cancel_future_wait_time
+            max_concurrency,
+            config.cancel_future_wait_time,
+            self._config.max_chunk_reassembly_wait_time,
         )
         # Manage re-sending messages to retry topics
         self.__retry_manager = RetryManager(config)
         # Store information about pending retried messages
         self.__schedule_cache = RetryScheduleCache()
-        # Store chunking information
-        self.__chunk_tracker = ChunkingCache()
 
     @property
     def _consumer(self) -> Consumer:
@@ -162,7 +161,7 @@ class BaseConsumer:
                 )
                 self.__retry_manager.resend_message(message)
         finally:
-            self.__tracking_manager.schedule_commit(message)
+            self.__tracking_manager.schedule_commit(message, release_semaphore=True)
 
     def __graceful_shutdown(self) -> None:
         """
@@ -214,12 +213,15 @@ class BaseConsumer:
         Returns: Future of the target execution if the message can be processed.
             None otherwise.
         """
-        message_group = self.__chunk_tracker.receive(message)
+        message_group = self.__tracking_manager.receive(message)
         if not message_group:
             return None
         message_data = message_group.deserialize()
         if not message_data:
-            self.__tracking_manager.schedule_commit(message_group)
+            # Semaphore was not acquired
+            self.__tracking_manager.schedule_commit(
+                message_group, release_semaphore=False
+            )
             return None
         future = self._executor.submit(self._config.target, message_data)
         self.__tracking_manager.process_message(message_group, future)

@@ -470,7 +470,9 @@ def test_ack_message_with_exception(
     base_consumer._BaseConsumer__ack_message(message_group, mock_future)
 
     # Verify tracking manager schedule_commit was called
-    mock_tracking_manager.schedule_commit.assert_called_once_with(message_group)
+    mock_tracking_manager.schedule_commit.assert_called_once_with(
+        message_group, release_semaphore=True
+    )
 
     # Verify retry manager was called to resend the message
     mock_retry_manager.resend_message.assert_called_once_with(message_group)

@@ -3,12 +3,20 @@
 import logging
 from collections import defaultdict
 from concurrent.futures import Future
+from datetime import timedelta
 from itertools import chain
 from threading import Lock, Semaphore
 from typing import Any, Iterable
 
-from confluent_kafka import TopicPartition
+from confluent_kafka import TopicPartition, Message
 
+from retriable_kafka_client.chunking import MessageGroupBuilder
+from retriable_kafka_client.headers import (
+    get_header_value,
+    CHUNK_GROUP_HEADER,
+    NUMBER_OF_CHUNKS_HEADER,
+    CHUNK_ID_HEADER,
+)
 from retriable_kafka_client.kafka_utils import TrackingInfo, MessageGroup
 
 LOGGER = logging.getLogger(__name__)
@@ -25,6 +33,7 @@ class TrackingManager:
 
     Each message can be either:
     - untracked (committed or not polled)
+    - pending for reassembly (if not all message chunks have been received)
     - pending for processing (then we also track its task object)
     - pending for committing
 
@@ -52,7 +61,18 @@ class TrackingManager:
     using semaphore. On task finish or cancellation, the semaphore is released.
     """
 
-    def __init__(self, concurrency: int, cancel_wait_time: float):
+    def __init__(
+        self, concurrency: int, cancel_wait_time: float, max_chunk_wait_time: timedelta
+    ):
+        # The tuple holds group ID, topic and partition
+        # in case of group ID collision (that could mean an attack attempt).
+        # If the same consumer was used for different topics, an adversary
+        # may want to override split messages to execute different operations.
+        # By using group id as well as topic and partition, this attack is
+        # made impossible.
+        self.__message_builders: dict[
+            tuple[bytes, TrackingInfo], MessageGroupBuilder
+        ] = {}
         self.__to_process: dict[TrackingInfo, dict[tuple[int, ...], Future]] = (
             defaultdict(dict)
         )
@@ -60,6 +80,74 @@ class TrackingManager:
         self.__access_lock = Lock()  # For handling multithreaded access to this object
         self.__semaphore = Semaphore(concurrency)
         self.__cancel_wait_time = cancel_wait_time
+        self.__max_chunk_wait_time = max_chunk_wait_time
+
+    def _cleanup_stale_builders(self) -> None:
+        """
+        Delete stale message builders if the wait time exceeded the configured
+        maximum to release resources.
+
+        Returns:
+        """
+        to_pop = set()
+        for builder_id, builder in self.__message_builders.items():
+            if not builder.is_still_valid():
+                to_pop.add(builder_id)
+        for item in to_pop:
+            deleted_builder = self.__message_builders.pop(item)
+            message_group = deleted_builder.get_message_group(allow_incomplete=True)
+            if message_group is not None:
+                self.schedule_commit(
+                    message_group,
+                    release_semaphore=False,
+                )
+            if deleted_builder.partition_info:
+                LOGGER.warning(
+                    "Removing stale message builder that failed to assemble message in time. "
+                    "Lost message topic: %s, offsets: %s, group: %s",
+                    deleted_builder.partition_info.topic,
+                    ",".join(str(offset) for offset in deleted_builder.offsets),
+                    deleted_builder.group_id,
+                )
+
+    def receive(self, message: Message) -> MessageGroup | None:
+        """
+        Receive a message. If the message is whole, or it is
+        the last fragment, returns the whole message group
+        and flushes cache of this group. Otherwise, returns None
+        and the message fragment shall not be processed.
+        """
+        topic: str = message.topic()  # type: ignore[assignment]
+        partition: int = message.partition()  # type: ignore[assignment]
+        self._cleanup_stale_builders()
+        if (
+            (group_id := get_header_value(message, CHUNK_GROUP_HEADER)) is not None
+            and get_header_value(message, NUMBER_OF_CHUNKS_HEADER) is not None
+            and get_header_value(message, CHUNK_ID_HEADER) is not None
+        ):
+            builder_id = (group_id, TrackingInfo(topic, partition))
+            message_builder = self.__message_builders.get(builder_id, None)
+            if message_builder is None:
+                message_builder = MessageGroupBuilder(self.__max_chunk_wait_time)
+                self.__message_builders[builder_id] = message_builder
+            message_builder.add(message)
+            if message_builder.is_complete:
+                complete_group = message_builder.get_message_group()
+                self.__message_builders.pop(builder_id)
+                LOGGER.debug(
+                    "Received all message chunks, assembling group %s composed of %s messages.",
+                    group_id.hex(),
+                    message_builder.full_length,
+                )
+                return complete_group
+            LOGGER.debug(
+                "Received a message chunk from group %s in topic %s and partition %s.",
+                group_id.hex(),
+                topic,
+                partition,
+            )
+            return None
+        return MessageGroup(topic, partition, {0: message}, None)
 
     def pop_committable(self) -> list[TopicPartition]:
         """
@@ -73,6 +161,7 @@ class TrackingManager:
 
         Returns: list of committable message offsets
         """
+        self._cleanup_stale_builders()
         to_commit = []
         with self.__access_lock:
             for partition_info, tuples_pending_to_commit in self.__to_commit.items():
@@ -80,7 +169,14 @@ class TrackingManager:
                     # Nothing to commit
                     continue
 
-                tuples_pending_to_process = self.__to_process.get(partition_info, None)
+                tuples_pending_to_process = set(
+                    self.__to_process.get(partition_info, {}).keys()
+                )
+                tuples_pending_to_process.update(
+                    message_builder.offsets
+                    for builder_id, message_builder in self.__message_builders.items()
+                    if builder_id[1] == partition_info
+                )
                 if not tuples_pending_to_process:
                     # Nothing is blocking the committing
                     max_to_commit = max(_flatten_offsets(tuples_pending_to_commit))
@@ -150,16 +246,20 @@ class TrackingManager:
                 tuple(message_offset + 1 for message_offset in message_offsets)
             ] = future
 
-    def schedule_commit(self, message: MessageGroup) -> bool:
+    def schedule_commit(self, message: MessageGroup, release_semaphore: bool) -> bool:
         """
         Mark message as pending for committing when its processing is fully done.
         Args:
             message: Kafka message object
+            release_semaphore: Should the semaphore be released?
+                Must be set to False if this is called before the
+                message was sent to processing.
         Returns:
             True if successful (the message was previously marked
             as pending for processing), False otherwise
         """
-        self.__semaphore.release()
+        if release_semaphore:
+            self.__semaphore.release()
         partition_info = TrackingInfo.from_message_group(message)
         message_offsets = message.offsets
         stored_offsets = tuple(message_offset + 1 for message_offset in message_offsets)

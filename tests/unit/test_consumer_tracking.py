@@ -1,15 +1,25 @@
 """Tests for TrackingManager module"""
 
 import logging
+from datetime import datetime, timedelta, timezone
+from unittest.mock import MagicMock, patch
+
 import pytest
-from unittest.mock import MagicMock
 from concurrent.futures import Future
 from confluent_kafka import Message, TopicPartition
 
 from retriable_kafka_client.consumer_tracking import (
     TrackingManager,
 )
+from retriable_kafka_client.headers import (
+    CHUNK_GROUP_HEADER,
+    NUMBER_OF_CHUNKS_HEADER,
+    CHUNK_ID_HEADER,
+    serialize_number_to_bytes,
+)
 from retriable_kafka_client.kafka_utils import TrackingInfo, MessageGroup
+
+DEFAULT_CHUNK_WAIT = timedelta(minutes=15)
 
 
 @pytest.mark.parametrize(
@@ -70,7 +80,9 @@ def test_offset_cache_pop_committable(
     expected_remaining_to_commit: dict[int, set[int]],
 ) -> None:
     """Test pop_committable covers all branches with various partition states."""
-    cache = TrackingManager(concurrency=16, cancel_wait_time=30.0)
+    cache = TrackingManager(
+        concurrency=16, cancel_wait_time=30.0, max_chunk_wait_time=DEFAULT_CHUNK_WAIT
+    )
 
     # Setup the cache state
     for state in partition_states:
@@ -113,7 +125,9 @@ def test_offset_cache_schedule_commit_success(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     """Test schedule_commit successfully moves offset from to_process to to_commit."""
-    cache = TrackingManager(concurrency=16, cancel_wait_time=30.0)
+    cache = TrackingManager(
+        concurrency=16, cancel_wait_time=30.0, max_chunk_wait_time=DEFAULT_CHUNK_WAIT
+    )
 
     # Create a MessageGroup
     mock_inner_message = MagicMock(
@@ -139,7 +153,7 @@ def test_offset_cache_schedule_commit_success(
     assert (43,) not in cache._TrackingManager__to_commit.get(partition_info, set())
 
     # Now schedule it for commit
-    result = cache.schedule_commit(message_group)
+    result = cache.schedule_commit(message_group, release_semaphore=True)
 
     # Verify success
     assert result is True
@@ -157,7 +171,9 @@ def test_offset_cache_schedule_commit_without_prior_processing(
 ) -> None:
     """Test schedule_commit behavior when message wasn't marked for processing first."""
     caplog.set_level(logging.WARNING)
-    cache = TrackingManager(concurrency=16, cancel_wait_time=30.0)
+    cache = TrackingManager(
+        concurrency=16, cancel_wait_time=30.0, max_chunk_wait_time=DEFAULT_CHUNK_WAIT
+    )
 
     # Create a MessageGroup
     mock_inner_message = MagicMock(
@@ -172,8 +188,8 @@ def test_offset_cache_schedule_commit_without_prior_processing(
     )
 
     # Don't add it to to_process (simulating it was never marked for processing)
-    # Try to schedule commit
-    result = cache.schedule_commit(message_group)
+    # Try to schedule commit without releasing semaphore (wasn't acquired)
+    result = cache.schedule_commit(message_group, release_semaphore=False)
 
     # schedule_commit always returns True in the new implementation
     assert result is True
@@ -229,7 +245,9 @@ def offset_cache_revoke_processing(
     expected_cancelled: list[str],
     expected_not_cancelled: list[str],
 ) -> None:
-    tracking_manager = TrackingManager(concurrency=16, cancel_wait_time=30.0)
+    tracking_manager = TrackingManager(
+        concurrency=16, cancel_wait_time=30.0, max_chunk_wait_time=DEFAULT_CHUNK_WAIT
+    )
 
     # Track created mock futures by name
     future_registry = {}
@@ -334,7 +352,9 @@ def test_offset_cache_register_revoke(
     partitions_to_revoke: list[TopicPartition],
     expected_remaining_process: dict[TrackingInfo, set[int]],
 ) -> None:
-    cache = TrackingManager(concurrency=16, cancel_wait_time=30.0)
+    cache = TrackingManager(
+        concurrency=16, cancel_wait_time=30.0, max_chunk_wait_time=DEFAULT_CHUNK_WAIT
+    )
     cache._TrackingManager__to_process = to_process_data
 
     # Call register_revoke with partitions
@@ -354,7 +374,9 @@ def test_offset_cache_register_revoke_err(
     error: type[Exception],
 ) -> None:
     stub_partition = TrackingInfo("topic-a", 0)
-    cache = TrackingManager(concurrency=16, cancel_wait_time=30.0)
+    cache = TrackingManager(
+        concurrency=16, cancel_wait_time=30.0, max_chunk_wait_time=DEFAULT_CHUNK_WAIT
+    )
     mock_future = MagicMock(spec=Future)
     mock_future.cancel.return_value = False
     mock_future.result.side_effect = error("Whoops")
@@ -372,7 +394,9 @@ def test_offset_cache_schedule_commit_offset_not_in_partition(
     In the new implementation, schedule_commit always succeeds and adds to to_commit.
     """
     caplog.set_level(logging.WARNING)
-    cache = TrackingManager(concurrency=16, cancel_wait_time=30.0)
+    cache = TrackingManager(
+        concurrency=16, cancel_wait_time=30.0, max_chunk_wait_time=DEFAULT_CHUNK_WAIT
+    )
 
     # Create a MessageGroup
     mock_inner_message = MagicMock(
@@ -394,7 +418,7 @@ def test_offset_cache_schedule_commit_offset_not_in_partition(
         cache._TrackingManager__to_process[partition_info][(offset,)] = mock_future
 
     # Try to schedule commit for offset 42 which doesn't exist in the partition
-    result = cache.schedule_commit(message_group)
+    result = cache.schedule_commit(message_group, release_semaphore=False)
 
     # In new implementation, schedule_commit always succeeds
     assert result is True
@@ -411,3 +435,77 @@ def test_offset_cache_schedule_commit_offset_not_in_partition(
         (101,),
         (102,),
     }
+
+
+def _make_chunk_message(
+    group_id: bytes,
+    chunk_id: int,
+    total_chunks: int,
+    topic: str = "test-topic",
+    partition: int = 0,
+    offset: int = 0,
+) -> MagicMock:
+    msg = MagicMock(spec=Message)
+    msg.headers.return_value = [
+        (CHUNK_GROUP_HEADER, group_id),
+        (NUMBER_OF_CHUNKS_HEADER, serialize_number_to_bytes(total_chunks)),
+        (CHUNK_ID_HEADER, serialize_number_to_bytes(chunk_id)),
+    ]
+    msg.topic.return_value = topic
+    msg.partition.return_value = partition
+    msg.offset.return_value = offset
+    msg.value.return_value = b'{"partial"'
+    return msg
+
+
+@pytest.mark.parametrize(
+    "fresh_group_ids,stale_group_ids",
+    [
+        pytest.param(
+            [],
+            [b"group_a", b"group_b"],
+            id="all_stale_discard_everything",
+        ),
+        pytest.param(
+            [b"group_b"],
+            [b"group_a"],
+            id="one_stale_one_fresh_discard_one",
+        ),
+    ],
+)
+def test_tracking_manager__cleanup_stale_builders(
+    stale_group_ids: list[bytes],
+    fresh_group_ids: list[bytes],
+) -> None:
+    max_wait = timedelta(minutes=10)
+    base_time = datetime(2025, 1, 1, tzinfo=timezone.utc)
+
+    with patch("retriable_kafka_client.chunking.datetime") as mock_dt:
+        mock_dt.now.return_value = base_time
+
+        tracker = TrackingManager(
+            concurrency=16,
+            cancel_wait_time=30.0,
+            max_chunk_wait_time=max_wait,
+        )
+
+        for i, group_id in enumerate(stale_group_ids):
+            tracker.receive(_make_chunk_message(group_id, 0, 3, offset=i))
+
+        mock_dt.now.return_value = base_time + timedelta(minutes=8)
+        for i, group_id in enumerate(fresh_group_ids):
+            tracker.receive(_make_chunk_message(group_id, 0, 3, offset=100 + i))
+
+        assert len(tracker._TrackingManager__message_builders) == (
+            len(stale_group_ids) + len(fresh_group_ids)
+        )
+
+        mock_dt.now.return_value = base_time + timedelta(minutes=11)
+        tracker._cleanup_stale_builders()
+
+    assert len(tracker._TrackingManager__message_builders) == len(fresh_group_ids)
+    remaining_group_ids = {
+        builder.group_id
+        for builder in tracker._TrackingManager__message_builders.values()
+    }
+    assert remaining_group_ids == set(fresh_group_ids)
