@@ -2,12 +2,14 @@
 
 import asyncio
 import json
+import logging
 from typing import Generator, Any
 from unittest.mock import patch, MagicMock
 
 import pytest
 from confluent_kafka import KafkaException
 
+from retriable_kafka_client import SendError
 from retriable_kafka_client.producer import BaseProducer
 from retriable_kafka_client.config import ProducerConfig
 from retriable_kafka_client.headers import (
@@ -265,3 +267,38 @@ def test_serialize_message_resize_chunks(
             chunking_size != 0,
         )
     assert result == expected_output
+
+
+def test__get_delivery_callback(caplog: pytest.LogCaptureFixture) -> None:
+    """Test that _get_delivery_callback works as expected."""
+    caplog.set_level(logging.INFO)
+    topic_name = "foo"
+    callback = BaseProducer._get_delivery_callback(topic_name)
+    mock_err = MagicMock()
+    with pytest.raises(SendError):
+        callback(mock_err, None)
+    mock_msg = MagicMock(
+        topic=lambda: topic_name, partition=lambda: 0, offset=lambda: 67
+    )
+    callback(None, mock_msg)
+    assert (
+        f"Message delivered to topic: {topic_name}, partition: 0, offset 67"
+        in caplog.messages
+    )
+    with pytest.raises(SendError):
+        callback(None, None)
+
+
+@pytest.mark.parametrize(
+    ["problem", "is_retriable"],
+    [
+        (SendError("big bad", retriable=False, fatal=True, kafka_error=None), False),
+        (BufferError("buffer is no more more"), True),
+        (
+            SendError("big bad", retriable=True, fatal=False, kafka_error=MagicMock()),
+            True,
+        ),
+    ],
+)
+def test__is_problem_retriable(problem: Exception, is_retriable: bool) -> None:
+    assert BaseProducer._is_problem_retriable(problem) == is_retriable

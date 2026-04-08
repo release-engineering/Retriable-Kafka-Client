@@ -240,6 +240,7 @@ class ScaffoldConfig:
     split_messages: bool = False
     max_chunk_reassembly_wait_time: timedelta = field(default=timedelta(seconds=10))
     additional_settings: dict[str, Any] = field(default_factory=dict)
+    topic_config: dict[str, str] = field(default_factory=dict)
 
 
 class IntegrationTestScaffold:
@@ -292,7 +293,12 @@ class IntegrationTestScaffold:
                 all_topic_names.append(tc.retry_topic)
 
         new_topics = [
-            NewTopic(topic, num_partitions=1, replication_factor=1)
+            NewTopic(
+                topic,
+                num_partitions=1,
+                replication_factor=1,
+                config=self.config.topic_config,
+            )
             for topic in all_topic_names
         ]
 

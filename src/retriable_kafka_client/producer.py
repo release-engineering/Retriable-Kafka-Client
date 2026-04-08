@@ -5,11 +5,12 @@ import json
 import logging
 import time
 from copy import copy
-from typing import Any, Generator
+from typing import Any, Generator, Callable
 
-from confluent_kafka import Producer, KafkaException
+from confluent_kafka import Producer, KafkaException, Message, KafkaError
 
 from .chunking import generate_group_id, calculate_header_size
+from .error import SendError
 from .headers import (
     CHUNK_GROUP_HEADER,
     NUMBER_OF_CHUNKS_HEADER,
@@ -48,6 +49,46 @@ class BaseProducer:
             **DEFAULT_PRODUCER_SETTINGS,
         }
         self._config_dict.update(**self._config.additional_settings)
+
+    @staticmethod
+    def _get_delivery_callback(
+        topic: str,
+    ) -> Callable[[KafkaError | None, Message | None], None]:
+        """
+        Gets the callback which should be called upon delivery of messages.
+        Handles errors or logs information about messages.
+        Args:
+            topic: The topic to which this callback should be called.
+                Used for logging information.
+
+        Returns: The callable which should be used as the actual callback.
+        """
+
+        def callback(err: KafkaError | None, msg: Message | None) -> None:
+            if err is not None:
+                raise SendError(
+                    f"Failed to flush produced message to topic "
+                    f"{topic}\n{SendError.format_err(err)}",
+                    retriable=err.retriable(),
+                    fatal=err.fatal(),
+                    kafka_error=err,
+                )
+            if msg is not None:
+                LOGGER.info(
+                    "Message delivered to topic: %s, partition: %s, offset %s",
+                    msg.topic(),
+                    msg.partition(),
+                    msg.offset(),
+                )
+                return None
+            raise SendError(
+                "Failed to flush produced message to topic, no details from the server.",
+                retriable=True,
+                fatal=False,
+                kafka_error=None,
+            )
+
+        return callback
 
     @property
     def topics(self) -> list[str]:
@@ -122,6 +163,13 @@ class BaseProducer:
                 LOGGER.error("Cannot produce to topic %s: %s", problem_topic, problem)
             raise next(iter(problems.values()))
 
+    @staticmethod
+    def _is_problem_retriable(problem: Exception) -> bool:
+        is_retriable = True
+        if isinstance(problem, SendError):
+            is_retriable = problem.retriable
+        return is_retriable
+
     def _prepare_chunks(
         self,
         group_id: bytes,
@@ -156,6 +204,8 @@ class BaseProducer:
             TypeError: if message is not a JSON-serializable object nor bytes
             BufferError: if Kafka queue is full even after all attempts
             KafkaException: if some Kafka error occurs even after all attempts
+            SendError: if any problems appear in Kafka cluster after sending
+                a message
         """
         problems: dict[str, Exception] = {}
         timestamp = int(time.time() * 1000)  # Kafka expects milliseconds
@@ -172,16 +222,20 @@ class BaseProducer:
                             timestamp=timestamp,
                             headers=chunk_headers,
                             key=group_id,
+                            on_delivery=self._get_delivery_callback(topic),
                         )
+                        self._producer.flush()
                         break
-                    except (BufferError, KafkaException) as err:
-                        if attempt_idx < self._config.retries:
+                    except (BufferError, KafkaException, SendError) as err:
+                        if (
+                            self._is_problem_retriable(err)
+                            and attempt_idx < self._config.retries
+                        ):
                             backoff_time = self.__calculate_backoff(attempt_idx)
                             self.__log_retry(attempt_idx, backoff_time)
                             time.sleep(backoff_time)
                             continue
                         problems[topic] = err
-        self._producer.flush()
         self.__handle_problems(problems)
 
     async def send(
@@ -200,6 +254,8 @@ class BaseProducer:
             TypeError: if message is not a JSON-serializable object nor bytes
             BufferError: if Kafka queue is full even after all attempts
             KafkaException: if some Kafka error occurs even after all attempts
+            SendError: if any problems appear in Kafka cluster after sending
+                a message
         """
         problems: dict[str, Exception] = {}
         timestamp = int(time.time() * 1000)  # Kafka expects milliseconds
@@ -216,16 +272,20 @@ class BaseProducer:
                             timestamp=timestamp,
                             headers=chunk_headers,
                             key=group_id,
+                            on_delivery=self._get_delivery_callback(topic),
                         )
+                        self._producer.flush()
                         break
-                    except (BufferError, KafkaException) as err:
-                        if attempt_idx < self._config.retries:
+                    except (BufferError, KafkaException, SendError) as err:
+                        if (
+                            self._is_problem_retriable(err)
+                            and attempt_idx < self._config.retries
+                        ):
                             backoff_time = self.__calculate_backoff(attempt_idx)
                             self.__log_retry(attempt_idx, backoff_time)
                             await asyncio.sleep(backoff_time)
                             continue
                         problems[topic] = err
-        self._producer.flush()
         self.__handle_problems(problems)
 
     def connection_healthcheck(self) -> bool:
