@@ -19,10 +19,13 @@ committing.
 
 import datetime
 import logging
+import re
 from collections import defaultdict
+from typing import TypeVar
 
 from confluent_kafka import Message, KafkaException, TopicPartition
 
+from .error import SendError
 from .config import ProducerConfig, ConsumerConfig, ConsumeTopicConfig
 from .headers import (
     TIMESTAMP_HEADER,
@@ -36,6 +39,7 @@ from .producer import BaseProducer
 
 
 LOGGER = logging.getLogger(__name__)
+T = TypeVar("T")
 
 
 def _get_retry_timestamp(message: Message) -> float | None:
@@ -74,6 +78,39 @@ def _get_current_timestamp() -> float:
         the current timestamp in POSIX format
     """
     return datetime.datetime.now(tz=datetime.timezone.utc).timestamp()
+
+
+def _regex_lookup_and_update_in_dict(
+    input_key: str, lookup_dict: dict[str, T]
+) -> T | None:
+    """
+    Lookup a key in a dictionary. If not present, try matching
+    the input key with a dictionary key. If matched, update the
+    lookup dict and return the corresponding value.
+
+    This is useful for searching and updating lookup tables
+    for retry configs and producers.
+
+    Args:
+        input_key: Usually topic name as present in the received message,
+            the key we search for.
+        lookup_dict: Lookup dict, it's keys can be either
+            direct matches or regex patterns
+    Returns:
+        The item from the lookup dict, or None if no item was found.
+    """
+    result = lookup_dict.get(input_key, None)
+    if result is not None:
+        return result
+    for dict_key, dict_value in lookup_dict.items():
+        try:
+            if re.match(dict_key, input_key):
+                # Store the lookup for next time
+                lookup_dict[input_key] = dict_value
+                return dict_value
+        except re.PatternError:
+            pass
+    return None
 
 
 class RetryScheduleCache:
@@ -254,7 +291,9 @@ class RetryManager:
             message: Kafka message that will be retried
         Returns: dictionary of retry headers used for next sending
         """
-        relevant_config = self.__topic_lookup.get(message.topic)
+        relevant_config = _regex_lookup_and_update_in_dict(
+            message.topic, self.__topic_lookup
+        )
         if relevant_config is None:
             return None
         previous_attempt = _get_retry_attempt(message)
@@ -277,7 +316,9 @@ class RetryManager:
             message: the Kafka message that failed to be processed
         """
         message_topic = message.topic
-        relevant_producer = self.__retry_producers.get(message_topic)
+        relevant_producer = _regex_lookup_and_update_in_dict(
+            message_topic, self.__retry_producers
+        )
         if relevant_producer is None:
             LOGGER.debug(
                 "Message %s from topic %s does not have configured retry topic.",
@@ -287,7 +328,9 @@ class RetryManager:
             return
 
         # Check if we've exhausted retry attempts
-        relevant_config = self.__topic_lookup.get(message_topic)
+        relevant_config = _regex_lookup_and_update_in_dict(
+            message_topic, self.__topic_lookup
+        )
         if relevant_config is not None:
             current_attempt = _get_retry_attempt(message)
             if current_attempt >= relevant_config.retries:
@@ -309,7 +352,7 @@ class RetryManager:
                 message_topic,
                 extra={"message_raw": str(message.all_chunks)},
             )
-        except (TypeError, BufferError, KafkaException):
+        except (TypeError, BufferError, KafkaException, SendError):
             LOGGER.exception(
                 "Cannot resend message from topic: %s to its retry topic %s",
                 message_topic,
