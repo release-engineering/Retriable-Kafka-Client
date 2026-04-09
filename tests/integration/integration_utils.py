@@ -337,6 +337,7 @@ class IntegrationTestScaffold:
         max_concurrency: int = 4,
         max_workers: int = 2,
         filter_function: Callable[[Any], bool] | None = None,
+        override_topics: list[ConsumeTopicConfig] | None = None,
     ) -> ConsumerHandle:
         """
         Create and start a consumer with the specified configuration.
@@ -348,6 +349,7 @@ class IntegrationTestScaffold:
             max_concurrency: Consumer concurrency limit
             max_workers: Thread pool size
             filter_function: Filters messages based on the user-provided function
+            override_topics: If provided, override the topic config
 
         Returns:
             A ConsumerHandle that can be used to stop the consumer.
@@ -367,7 +369,7 @@ class IntegrationTestScaffold:
         # Create consumer
         consumer_config = ConsumerConfig(
             kafka_hosts=[self.kafka_config[KafkaOptions.KAFKA_NODES]],
-            topics=self.config.topics,
+            topics=self.config.topics if override_topics is None else override_topics,
             username=self.kafka_config[KafkaOptions.USERNAME],
             password=self.kafka_config[KafkaOptions.PASSWORD],
             group_id=self.config.group_id,

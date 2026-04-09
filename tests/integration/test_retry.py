@@ -28,20 +28,24 @@ async def test_retry_mechanism_on_failure(
     Test that when a message processing fails, it gets retried via the retry topic
     and eventually succeeds.
     """
+    topic_config = ConsumeTopicConfig(
+        base_topic="test-base-topic",
+        retry_topic="test-retry-topic",
+        retries=3,
+        fallback_delay=1.0,
+    )
     config = ScaffoldConfig(
         topics=[
-            ConsumeTopicConfig(
-                base_topic="test-base-topic",
-                retry_topic="test-retry-topic",
-                retries=3,
-                fallback_delay=1.0,
-            ),
+            topic_config,
         ],
         group_id="test-retry-consumer-group",
     )
 
     async with IntegrationTestScaffold(kafka_config, admin_client, config) as scaffold:
-        scaffold.start_consumer(fail_chance_on_first=1.0)
+        topic_config.base_topic = "^[t]est-base-topic$"
+        scaffold.start_consumer(
+            fail_chance_on_first=1.0, override_topics=[topic_config]
+        )
         await asyncio.sleep(2)  # Wait for consumer to be ready
 
         await scaffold.send_messages(1)

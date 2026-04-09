@@ -470,7 +470,7 @@ def test__get_retry_headers_no_config() -> None:
     "topics,message_topic,send_error,expect_send",
     [
         pytest.param(
-            [ConsumeTopicConfig(base_topic="t", retry_topic="t-retry")],
+            [ConsumeTopicConfig(base_topic="^t$", retry_topic="t-retry")],
             "t",
             None,
             True,
@@ -496,6 +496,16 @@ def test__get_retry_headers_no_config() -> None:
             KafkaException(KafkaError(1, "I don't feel like working today")),
             True,
             id="exception_logged",
+        ),
+        pytest.param(
+            [
+                ConsumeTopicConfig(base_topic="t[", retry_topic="t-retry"),
+                ConsumeTopicConfig(base_topic="^u$", retry_topic="u-retry"),
+            ],
+            "u",
+            None,
+            True,
+            id="regex_matching",
         ),
     ],
 )
