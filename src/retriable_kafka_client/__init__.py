@@ -5,6 +5,7 @@ from .config import ConsumerConfig, ProducerConfig, ConsumeTopicConfig, CommonCo
 from .orchestrate import consume_topics, ConsumerThread
 from .producer import BaseProducer
 from .health import HealthCheckClient
+from .error import SendError
 
 __all__ = (
     "BaseConsumer",
@@ -16,4 +17,5 @@ __all__ = (
     "ProducerConfig",
     "ConsumeTopicConfig",
     "HealthCheckClient",
+    "SendError",
 )

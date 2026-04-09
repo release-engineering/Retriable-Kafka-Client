@@ -1,6 +1,7 @@
 """Types used in this library"""
 
 from dataclasses import dataclass, field
+from datetime import timedelta
 from typing import Callable, Any
 
 from confluent_kafka import Message
@@ -42,6 +43,7 @@ class ProducerConfig(CommonConfig):
     retries: int = field(default=3)
     fallback_factor: float = field(default=2.0)
     fallback_base: float = field(default=5.0)
+    split_messages: bool = field(default=False)
 
 
 @dataclass
@@ -84,6 +86,11 @@ class ConsumerConfig(CommonConfig):
             Returns True if the message will be processed
             or False if skipped. In case False or exception is returned,
             message will be committed without processing.
+        max_chunk_reassembly_wait_time: Maximal time to wait for all the chunks
+            of the message to arrive. Has any effect only if chunking is enabled.
+            If some chunks are still waiting for reassembly after this threshold,
+            they are deleted and a warning is logged. This happens if the producer
+            crashed during producing of the chunked message, data cannot be salvaged.
     """
 
     group_id: str
@@ -91,3 +98,4 @@ class ConsumerConfig(CommonConfig):
     topics: list[ConsumeTopicConfig] = field(default_factory=list)
     cancel_future_wait_time: float = field(default=30.0)
     filter_function: Callable[[Message], bool] | None = field(default=None)
+    max_chunk_reassembly_wait_time: timedelta = field(default=timedelta(minutes=15))

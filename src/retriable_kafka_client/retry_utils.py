@@ -24,11 +24,16 @@ from collections import defaultdict
 from confluent_kafka import Message, KafkaException, TopicPartition
 
 from .config import ProducerConfig, ConsumerConfig, ConsumeTopicConfig
+from .headers import (
+    TIMESTAMP_HEADER,
+    ATTEMPT_HEADER,
+    serialize_number_to_bytes,
+    deserialize_number_from_bytes,
+    get_header_value,
+)
+from .kafka_utils import MessageGroup
 from .producer import BaseProducer
 
-_HEADER_PREFIX = "retriable_kafka_"
-ATTEMPT_HEADER = _HEADER_PREFIX + "attempt"
-TIMESTAMP_HEADER = _HEADER_PREFIX + "timestamp"
 
 LOGGER = logging.getLogger(__name__)
 
@@ -42,29 +47,23 @@ def _get_retry_timestamp(message: Message) -> float | None:
     Returns:
         the timestamp in POSIX format or None if no timestamp was found
     """
-    headers = message.headers()
-    if headers is None:
-        return None
-    for header_name, header_value in headers:
-        if header_name == TIMESTAMP_HEADER:
-            return int.from_bytes(header_value, "big")
+    header_val = get_header_value(message, TIMESTAMP_HEADER)
+    if header_val is not None:
+        return deserialize_number_from_bytes(header_val)
     return None
 
 
-def _get_retry_attempt(message: Message) -> int:
+def _get_retry_attempt(message_group: MessageGroup) -> int:
     """
     Retrieves the attempt number from the message's header.
     Args:
-        message: Kafka message object
+        message_group: Kafka message group object
     Returns:
         the number of attempt or 0 if no attempt header was found
     """
-    headers = message.headers()
-    if headers is None:
-        return 0
-    for header_name, header_value in headers:
-        if header_name == ATTEMPT_HEADER:
-            return int.from_bytes(header_value, "big")
+    header_val = get_header_value(message_group, ATTEMPT_HEADER)
+    if header_val is not None:
+        return deserialize_number_from_bytes(header_val)
     return 0
 
 
@@ -239,12 +238,15 @@ class RetryManager:
                 username=self.__config.username,
                 password=self.__config.password,
                 additional_settings=self.__config.additional_settings,
+                split_messages=True,
             )
             producer = BaseProducer(config=producer_config)
             self.__retry_producers[topic_config.retry_topic] = producer
             self.__retry_producers[topic_config.base_topic] = producer
 
-    def _get_retry_headers(self, message: Message) -> dict[str, str | bytes] | None:
+    def _get_retry_headers(
+        self, message: MessageGroup
+    ) -> dict[str, str | bytes] | None:
         """
         Create a dictionary of retry headers that will be used for the retried mechanism.
         The headers are generated based on the headers from the previous message.
@@ -252,18 +254,17 @@ class RetryManager:
             message: Kafka message that will be retried
         Returns: dictionary of retry headers used for next sending
         """
-        message_topic: str = message.topic()  # type: ignore[assignment]
-        relevant_config = self.__topic_lookup.get(message_topic)
+        relevant_config = self.__topic_lookup.get(message.topic)
         if relevant_config is None:
             return None
         previous_attempt = _get_retry_attempt(message)
         retry_timestamp = _get_current_timestamp() + relevant_config.fallback_delay
         return {
-            ATTEMPT_HEADER: (previous_attempt + 1).to_bytes(length=8, byteorder="big"),
-            TIMESTAMP_HEADER: int(retry_timestamp).to_bytes(length=8, byteorder="big"),
+            ATTEMPT_HEADER: serialize_number_to_bytes(previous_attempt + 1),
+            TIMESTAMP_HEADER: serialize_number_to_bytes(retry_timestamp),
         }
 
-    def resend_message(self, message: Message) -> None:
+    def resend_message(self, message: MessageGroup) -> None:
         """
         Send the message's copy to the specified retry topic.
         Also update its headers so that it will only be retried after
@@ -275,10 +276,7 @@ class RetryManager:
         Args:
             message: the Kafka message that failed to be processed
         """
-        message_topic = message.topic()
-        message_value = message.value()
-        if message_topic is None or message_value is None:
-            return
+        message_topic = message.topic
         relevant_producer = self.__retry_producers.get(message_topic)
         if relevant_producer is None:
             LOGGER.debug(
@@ -298,23 +296,23 @@ class RetryManager:
                     "Message will not be retried.",
                     message_topic,
                     relevant_config.retries,
-                    extra={"message_raw": str(message.value())},
+                    extra={"message_raw": str(message.all_chunks)},
                 )
                 return
 
         try:
             relevant_producer.send_sync(
-                message_value, headers=self._get_retry_headers(message)
+                message.all_chunks, headers=self._get_retry_headers(message)
             )
             LOGGER.debug(
                 "Message from topic sent for reprocessing, %s",
                 message_topic,
-                extra={"message_raw": str(message.value())},
+                extra={"message_raw": str(message.all_chunks)},
             )
         except (TypeError, BufferError, KafkaException):
             LOGGER.exception(
                 "Cannot resend message from topic: %s to its retry topic %s",
                 message_topic,
                 relevant_producer.topics,
-                extra={"message_raw": str(message.value())},
+                extra={"message_raw": str(message.all_chunks)},
             )
