@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.6.1](https://github.com/release-engineering/Retriable-Kafka-Client/compare/v0.6.0...v0.6.1) (2026-04-09)
+
+
+### Bug Fixes
+
+* retry lookup supports regex ([ceb7695](https://github.com/release-engineering/Retriable-Kafka-Client/commit/ceb76952420faa21d7515894d1c53b3285502432))
+
 ## [0.6.0](https://github.com/release-engineering/Retriable-Kafka-Client/compare/v0.5.0...v0.6.0) (2026-04-09)
 
 
