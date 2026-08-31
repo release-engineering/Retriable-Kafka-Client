@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.6.2](https://github.com/release-engineering/Retriable-Kafka-Client/compare/v0.6.1...v0.6.2) (2026-08-31)
+
+
+### Documentation
+
+* **ISV-7458:** add governance ([c932dd6](https://github.com/release-engineering/Retriable-Kafka-Client/commit/c932dd6f049610db95e41da752079e13fdc1a8fb))
+
 ## [0.6.1](https://github.com/release-engineering/Retriable-Kafka-Client/compare/v0.6.0...v0.6.1) (2026-04-09)
 
 
