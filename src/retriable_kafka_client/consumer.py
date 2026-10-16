@@ -124,10 +124,11 @@ class BaseConsumer:
             try:
                 self._consumer.commit(offsets=committable, asynchronous=False)
             except KafkaException:
-                LOGGER.exception(
+                LOGGER.warning(
                     "Temporarily failed to commit messages to partitions %s. "
                     "This action will be retried.",
                     committable,
+                    exc_info=True,
                 )
                 self.__tracking_manager.reschedule_uncommittable(committable)
 
@@ -154,7 +155,7 @@ class BaseConsumer:
             return
         try:
             if problem := finished_future.exception():
-                LOGGER.error(
+                LOGGER.warning(
                     "Message could not be processed! Message: %s.",
                     message.deserialize(),
                     exc_info=problem,
