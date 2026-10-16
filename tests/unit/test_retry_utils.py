@@ -546,3 +546,4 @@ def test_resend_message_exhausted_attempts(caplog: pytest.LogCaptureFixture) -> 
         manager.resend_message(message_group)
         mock_cls.return_value.send_sync.assert_not_called()
         assert "Message will not be retried." in caplog.messages[-1]
+        assert caplog.records[-1].levelname == "ERROR"
