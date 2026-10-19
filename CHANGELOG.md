@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.7.0](https://github.com/release-engineering/Retriable-Kafka-Client/compare/v0.6.1...v0.7.0) (2026-10-19)
+
+
+### Features
+
+* **ISV-7750:** rationalize log severity ([92e5b60](https://github.com/release-engineering/Retriable-Kafka-Client/commit/92e5b60814d10486716c5ac56b62c469f410039c))
+* **ISV-7750:** rationalize log severity ([47d60d7](https://github.com/release-engineering/Retriable-Kafka-Client/commit/47d60d7f30adae3930b7c67bae1765c5f1514df5))
+
+
+### Documentation
+
+* **ISV-7458:** add governance ([c932dd6](https://github.com/release-engineering/Retriable-Kafka-Client/commit/c932dd6f049610db95e41da752079e13fdc1a8fb))
+
 ## [0.6.1](https://github.com/release-engineering/Retriable-Kafka-Client/compare/v0.6.0...v0.6.1) (2026-04-09)
 
 
