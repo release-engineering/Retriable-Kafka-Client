@@ -222,3 +222,4 @@ async def test_exhausted_retries_stops_processing(
             f"Log messages with 'retry': "
             f"{[r.message for r in caplog.records if 'retry' in r.message.lower()]}"
         )
+        assert all(record.levelname == "ERROR" for record in exhausted_logs)

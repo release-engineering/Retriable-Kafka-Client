@@ -443,7 +443,7 @@ def test_ack_message_with_exception(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     """Test __ack_message when the future raises an exception."""
-    caplog.set_level(logging.ERROR)
+    caplog.set_level(logging.WARNING)
 
     # Mock the tracking manager
     mock_tracking_manager = MagicMock()
@@ -482,9 +482,9 @@ def test_ack_message_with_exception(
     # Verify retry manager was called to resend the message
     mock_retry_manager.resend_message.assert_called_once_with(message_group)
 
-    # Verify error was logged
+    # Verify warning was logged (retryable failure; terminal drop is ERROR elsewhere)
     assert len(caplog.records) == 1
-    assert caplog.records[0].levelname == "ERROR"
+    assert caplog.records[0].levelname == "WARNING"
     assert "Message could not be processed!" in caplog.records[0].message
     assert "test" in caplog.records[0].message
     assert caplog.records[0].exc_info[1] is test_exception

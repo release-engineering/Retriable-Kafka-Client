@@ -310,7 +310,7 @@ class RetryManager:
         the specified amount of time. Skips empty messages.
 
         If the message has already exhausted its retry attempts, it will
-        not be resent and will be logged as a warning.
+        not be resent and will be logged as an error.
 
         Args:
             message: the Kafka message that failed to be processed
@@ -334,7 +334,7 @@ class RetryManager:
         if relevant_config is not None:
             current_attempt = _get_retry_attempt(message)
             if current_attempt >= relevant_config.retries:
-                LOGGER.warning(
+                LOGGER.error(
                     "Message from topic %s exhausted all %d retry attempts. "
                     "Message will not be retried.",
                     message_topic,
